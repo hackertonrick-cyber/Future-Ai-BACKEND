@@ -5,7 +5,7 @@ import { instrument } from "@socket.io/admin-ui"
  * Map<userId: string, Set<socketId: string>>
  * Allows tracking multiple socket connections per user
  */
-export const onlineUsers = new Map()
+export const onlinePatients = new Map()
 
 const io = new Server({
   cors: {
@@ -54,10 +54,10 @@ privateNamespace.on("connection", (socket) => {
     if (data?.user) {
       userId = data.user
 
-      if (!onlineUsers.has(userId)) {
-        onlineUsers.set(userId, new Set())
+      if (!onlinePatients.has(userId)) {
+        onlinePatients.set(userId, new Set())
       }
-      onlineUsers.get(userId).add(socket.id)
+      onlinePatients.get(userId).add(socket.id)
       socket.join(userId)
       console.log(`Socket ${socket.id} joined personal room ${userId}`)
     } else {
@@ -69,19 +69,19 @@ privateNamespace.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log(`User disconnected: ${socket.id}`)
 
-    if (userId && onlineUsers.has(userId)) {
-      const userSockets = onlineUsers.get(userId)
+    if (userId && onlinePatients.has(userId)) {
+      const userSockets = onlinePatients.get(userId)
       userSockets.delete(socket.id)
       if (userSockets.size === 0) {
-        onlineUsers.delete(userId)
+        onlinePatients.delete(userId)
         console.log(`User ${userId} marked offline`)
       }
     }
   })
 
 socket.on("checkIfOnline", (userId, callback) => {
-  const isOnline = onlineUsers.has(userId)
-  console.log(onlineUsers)
+  const isOnline = onlinePatients.has(userId)
+  console.log(onlinePatients)
   console.log(`🧠 [checkIfOnline] User ${userId} is ${isOnline ? 'ONLINE' : 'OFFLINE'}`)
   callback(isOnline)
 })

@@ -18,7 +18,6 @@ const geoPoint = Joi.object({
     )
     .default([0, 0]),
 })
-const LPGAmount = Joi.number().integer().min(1)
 const booleanRequired = Joi.boolean().required()
 const booleanOptional = Joi.boolean().optional()
 const date = Joi.date()
@@ -33,7 +32,6 @@ export const JoiValidators = {
   password,
   objectId,
   geoPoint,
-  LPGAmount,
   booleanRequired,
   booleanOptional,
   date,

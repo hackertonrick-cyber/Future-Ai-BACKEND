@@ -1,13 +1,13 @@
 import express from "express"
 import jwt from "jsonwebtoken"
-import { authUser, getAuthData } from "../controllers/userController.js"
-import { protect } from "../middleware/authMiddleware.js"
+import { authOrgUser, authPatient } from "../controllers/userController.js"
 import passport from "passport"
-import Redis from "../models/redisModel.js"
+import Redis from "../models/RedisModel.js"
 
 const router = express.Router()
 
-router.post("/login", authUser)
+router.post("/org/login", authOrgUser)
+router.post("/login", authPatient)
 
 // @desc    Google auth callback
 // @route   GET /auth/google/callback
@@ -94,6 +94,4 @@ router.get("/google/callback", async (req, res, next) => {
   })(req, res, next);
 });
 
-
-router.route("/auth-data").get(protect, getAuthData)
 export default router

@@ -18,8 +18,7 @@ import { apiLimiter } from "./middleware/authMiddleware.js"
 
 // Routers
 import authRoutes from "./routes/authRoutes.js"
-import webhookRoutes from "./routes/webhookRoutes.js"
-import userRoutes from "./routes/userRoutes.js"
+import orgUserRoutes from "./routes/orgUserRoutes.js"
 import configurePassport from "./utils/passport.js"
 
 // ---- DB & auth ----
@@ -63,7 +62,7 @@ if (process.env.NODE_ENV === "production") {
 
 // ---- API routes ----
 app.use("/api/auth", authRoutes)
-app.use("/api/user", userRoutes)
+app.use("/api/org-user", orgUserRoutes)
 
 // Uploads
 app.use("/uploads", express.static(path.join(__dirname, "/uploads")))

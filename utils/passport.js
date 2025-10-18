@@ -1,9 +1,8 @@
 import { Strategy as GoogleStrategy } from "passport-google-oauth20"
 import { OAuth2Client } from "google-auth-library"
-import User from "../models/userModel.js"
 
-import generateUserAuthData from "./generateUserAuthData.js"
-import { onlineUsers, privateNamespace } from "./socket.js"
+import generatePatientAuthData from "./generatePatientAuthData.js"
+import { onlinePatients, privateNamespace } from "./socket.js"
 
 const configurePassport = (passport) => {
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.GOOGLE_CALLBACK_URL) {
@@ -28,7 +27,7 @@ const configurePassport = (passport) => {
           const oauth2Client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_CALLBACK_URL)
           oauth2Client.setCredentials({ access_token: accessToken })
 
-          const newUser = {
+          const newPatient = {
             googleId: id,
             userName: email ? email.split("@")[0] : `${givenName}_${familyName}`,
             firstName: givenName,
@@ -38,22 +37,22 @@ const configurePassport = (passport) => {
           }
           console.log("Checking for user:", id)
           // Check if the user exists
-          let user = await User.findOne({ googleId: id })
+          let user = await Patient.findOne({ googleId: id })
             .lean()
-          console.log("User found:", user)
+          console.log("Patient found:", user)
           if (!user) {
-            console.log("No user found, sending REDIRECT_SIGNUP", newUser)
+            console.log("No user found, sending REDIRECT_SIGNUP", newPatient)
             // No user found,
             // partial signup time
             return done(null, false, {
               message: "REDIRECT_SIGNUP",
-              user: newUser,
+              user: newPatient,
             })
           }
 
-          if (onlineUsers.has(user._id.toString())) {
+          if (onlinePatients.has(user._id.toString())) {
             console.log("Online users logout triggered (Google auth flow)")
-            privateNamespace.to(user._id.toString()).emit("logoutUser")
+            privateNamespace.to(user._id.toString()).emit("logoutPatient")
 
             // Give them a moment to breathe before proceeding
             await new Promise((resolve) => setTimeout(resolve, 5000))
@@ -62,7 +61,7 @@ const configurePassport = (passport) => {
           // Return fully authenticated user object
           let authData
           try {
-            authData = generateUserAuthData(user)
+            authData = generatePatientAuthData(user)
           } catch (genErr) {
             console.error("Error generating authData:", genErr)
             return done(genErr, null)
@@ -79,13 +78,13 @@ const configurePassport = (passport) => {
     )
   )
 
-  passport.serializeUser((sessionUser, done) => {
-    // sessionUser can be custom object now
-    done(null, sessionUser)
+  passport.serializePatient((sessionPatient, done) => {
+    // sessionPatient can be custom object now
+    done(null, sessionPatient)
   })
 
-  passport.deserializeUser((sessionUser, done) => {
-    done(null, sessionUser)
+  passport.deserializePatient((sessionPatient, done) => {
+    done(null, sessionPatient)
   })
 }
 

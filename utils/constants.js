@@ -1,117 +1,67 @@
 import { Types } from "mongoose"
 import sharp from "sharp"
-import Redis from "../models/redisModel.js"
 import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand } from "@aws-sdk/client-s3"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
-import UserNotifications from "../models/userNotificationsModel.js"
 import { sendEmail } from "../middleware/s3.js"
+import { privateNamespace } from "./socket.js"
+import Redis from "../models/RedisModel.js"
+
+/* ----------------------------------------------------------
+ *  CONSTANTS
+ * ---------------------------------------------------------- */
 
 export const ERROR_RESPONSE = {
-  //#region User
-  EMAIL_ALREADY_REGISTERED: "Choose an alternative!.. Email already registered.",
-  FAILED_VERIFICATION: "Verification Failed!O NO!.",
-  USER_NOT_FOUND: "Unable to locate defined user!",
-  USER_ALREADY_EXIST: "User already Exist!..",
-  EMAIL_IN_USE: " Email already in use, login or request a password reset..",
-  MUST_BE_SIXTEEN_AND_OLDER: "User must be 16 and older..",
-  USER_NOT_CREATED: "Error creating user!",
-  UNAUTHORIZED: "😡😡The FBI's on their way mo-fucka?!!!😒😒😒",
-  //#endregion
-
-  //#region OrderType
-  ORDER_TYPE_NOT_FOUND: "Unable to locate defined heist!",
-  ORDER_TYPE_ALREADY_EXIST: "OrderType already Exist!..",
-  //#endregion
-
-  //#region Image
-  IMAGE_NOT_FOUND: "Unable to locate defined image!",
-  IMAGE_ALREADY_EXIST: "Image already Exist!..",
-  //#endregion
-
-  //#region General
-  FAILED_AUTH: "Invalid credentials!!!",
-  FAILED: "Database operation failed",
-  INVALID_DATA: "Invalid data provided!",
-  FAILED_VERIFICATION: "Verification Failed!",
-  ALREADY_APPROVED: "No need, already Approved!",
-  ALREADY_PROCESSING: "No need, already Processing!",
-  INSUFFICIENT_FUNDS: "Insufficient funds! please deposit funds.",
-  DUPLICATE_ENTRY: "Object already exist in database",
-  INVALID_REQUEST: "Request deemed invalid, please check console for errors.",
-  INVALID_STATE: "database info invalid state"
-  //#endregion
+  USER_NOT_FOUND: "User not found.",
+  ORG_NOT_FOUND: "Organization not found.",
+  INVALID_REQUEST: "Invalid request data.",
+  INVALID_STATE: "Database invalid state.",
+  FAILED_AUTH: "Invalid credentials.",
+  FAILED: "Database operation failed.",
+  DUPLICATE_ENTRY: "Duplicate entry detected.",
+  INSUFFICIENT_FUNDS: "Insufficient funds.",
+  ACCESS_DENIED: "You are not authorized for this action.",
 }
 
 export const SUCCESS_RESPONSE = {
-  //#region User
-  USER_CREATED: "User has been created..!",
-  //#endregion
-
-  //#region General
-  SUCCESS: "success",
-  CREATED: "successfully created object in database",
-  //#endregion
+  SUCCESS: "Operation successful.",
+  CREATED: "Record created successfully.",
 }
 
+/* ----------------------------------------------------------
+ *  HELPER FUNCTIONS
+ * ---------------------------------------------------------- */
+
+/** Format large numbers (e.g., 1.2k, 2.3m) */
 export const formatCount = (count) => {
-  if (count < 1000) {
-    return count.toString()
-  } else if (count >= 1000 && count < 1000000) {
-    return (count / 1000).toFixed(count % 1000 === 0 ? 0 : 1) + "k"
-  } else if (count >= 1000000) {
-    return (count / 1000000).toFixed(count % 1000000 === 0 ? 0 : 1) + "m"
-  }
+  if (count < 1000) return count.toString()
+  if (count < 1_000_000) return (count / 1000).toFixed(count % 1000 === 0 ? 0 : 1) + "k"
+  return (count / 1_000_000).toFixed(count % 1_000_000 === 0 ? 0 : 1) + "m"
 }
 
-export const generateRoomId = (userId1, userId2) => {
-  // Sort the IDs to ensure consistency
-  const sortedIds = [userId1, userId2].sort()
-  return sortedIds.join("")
-}
+/** Generate consistent room IDs for messaging */
+export const generateRoomId = (id1, id2) => [id1, id2].sort().join("")
 
-export const generateMongoDBObjectId = () => {
-  // Generate a 4-byte timestamp (seconds since the Unix epoch)
-  const timestamp = Math.floor(Date.now() / 1000)
-    .toString(16)
-    .padStart(8, "0")
+/** Generate MongoDB ObjectId manually (if needed for pre-signed docs) */
+export const generateMongoDBObjectId = () => new Types.ObjectId()
 
-  // Generate 5 bytes of random values (machine identifier / random value)
-  const randomBytes = Array.from({ length: 5 }, () =>
-    Math.floor(Math.random() * 256)
-      .toString(16)
-      .padStart(2, "0")
-  ).join("")
+/** Extract client IP from proxy or direct */
+export const getClientIp = (req) =>
+  req.headers["x-forwarded-for"]?.split(",")[0] ||
+  req.connection?.remoteAddress ||
+  req.socket?.remoteAddress ||
+  req.ip
 
-  // Generate 3 bytes of a counter (unique value per ObjectId)
-  const counter = Math.floor(Math.random() * 0xffffff)
-    .toString(16)
-    .padStart(6, "0")
+/* ----------------------------------------------------------
+ *  IMAGE PROCESSING
+ * ---------------------------------------------------------- */
 
-  // Combine all parts to form a 24-character hex string
-  return new Types.ObjectId(`${timestamp}${randomBytes}${counter}`)
-}
-
-
-/**
- * Compresses and resizes an image buffer to be optimized for upload.
- * @param {Buffer} buffer - The original image buffer.
- * @param {Object} options - Optional resizing and compression settings.
- * @returns {Promise<Buffer>} - A compressed image buffer.
- */
+/** Compress and resize uploaded image before saving to Wasabi */
 export const compressImage = async (
   buffer,
-  options = {
-    width: 1080, // max width
-    quality: 80, // JPEG/WebP quality
-    format: "jpeg", // jpeg | png | webp
-  }
+  options = { width: 1080, quality: 80, format: "jpeg" }
 ) => {
   const { width, quality, format } = options
-
-  let transformer = sharp(buffer).resize({
-    width,
-    withoutEnlargement: true,
-  })
+  let transformer = sharp(buffer).resize({ width, withoutEnlargement: true })
 
   switch (format) {
     case "webp":
@@ -125,56 +75,43 @@ export const compressImage = async (
       break
   }
 
-  return await transformer.toBuffer()
+  return transformer.toBuffer()
 }
 
-// Set temporary user data
-export const setTempUserData = async (token, data, ttl = 60) => {
+/* ----------------------------------------------------------
+ *  REDIS TEMPORARY STORAGE (OTP, signup invites, etc.)
+ * ---------------------------------------------------------- */
+
+export const setTempData = async (key, value, ttlSeconds = 300) => {
   try {
-    const expirationTime = Date.now() + ttl * 1000 // TTL in milliseconds
     await Redis.create({
-      key: `signup:${token}`,
-      value: data,
-      createdAt: new Date(expirationTime), // Set the expiration time
+      key,
+      value,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + ttlSeconds * 1000),
     })
   } catch (error) {
-    console.error("Error setting temporary user data:", error)
-    throw new Error("Failed to store temporary user data")
+    console.error("Redis Temp Store Error:", error)
+    throw new Error("Failed to store temporary data")
   }
 }
 
-// Get temporary user data
-export const getTempUserData = async (token) => {
+export const getTempData = async (key) => {
   try {
-    const entry = await Redis.findOneAndDelete({ key: `signup:${token}` })
-    if (entry) {
-      return entry.value
-    }
-    return null // No data found or expired
+    const entry = await Redis.findOneAndDelete({ key })
+    return entry?.value || null
   } catch (error) {
-    console.error("Error fetching temporary user data:", error)
-    throw new Error("Failed to retrieve temporary user data")
+    console.error("Redis Temp Fetch Error:", error)
+    throw new Error("Failed to retrieve temporary data")
   }
 }
 
-export const getClientIp = (req) => {
-  return (
-    req.headers["x-forwarded-for"]?.split(",")[0] || // Behind proxies (e.g., Vercel, Heroku)
-    req.connection?.remoteAddress ||
-    req.socket?.remoteAddress ||
-    req.ip
-  )
-}
+/* ----------------------------------------------------------
+ *  WASABI S3 UTILITIES
+ * ---------------------------------------------------------- */
 
-/**
- * Generate a signed URL for uploading or downloading from Wasabi
- * @param {string} fileName - Name or path of the file
- * @param {string} bucketName - Target Wasabi bucket
- * @param {"upload" | "download"} action - Action type: 'upload' or 'download'
- * @param {string} [contentType] - MIME type for uploads (optional)
- */
-export const generateSignedUrl = async (fileName, bucketName, action = "download", contentType = "application/octet-stream") => {
-  const wasabiS3 = new S3Client({
+const createWasabiClient = () =>
+  new S3Client({
     region: process.env.WASABI_REGION,
     endpoint: process.env.WASABI_ENDPOINT,
     credentials: {
@@ -184,184 +121,149 @@ export const generateSignedUrl = async (fileName, bucketName, action = "download
     forcePathStyle: true,
   })
 
-  // Step 1: Sanitize only if it's a full Wasabi public URL
+/**
+ * Generate signed URL for upload/download
+ */
+export const generateSignedUrl = async (
+  fileName,
+  bucketName,
+  action = "download",
+  contentType = "application/octet-stream"
+) => {
+  const s3 = createWasabiClient()
   let key = fileName
 
-  // if (/^https?:\/\//.test(fileName) && action === "download") {
-  //   const url = new URL(fileName)
-  //   key = url.pathname.startsWith("/") ? url.pathname.slice(1) : url.pathname
-  // } else {
-  //   // Handle both with and without userId in the URL
-  //   key = fileName.replace(/^https?:\/\/[^\/]+\/(?:[^\/]+\/)?(.+)$/, "$1")
-  // }
   if (fileName.startsWith("http") && action === "download") {
     const url = new URL(fileName)
-    key = decodeURIComponent(url.pathname.slice(1)) // 🧠 decode to avoid double encoding
-  } else {
-    key = fileName
+    key = decodeURIComponent(url.pathname.slice(1))
   }
 
-  // Step 2: Prepare correct command
-  let command
-  if (action === "upload") {
-    command = new PutObjectCommand({
-      Bucket: bucketName,
-      Key: key,
-      ContentType: contentType,
-      ACL: "public-read", // Optional
-    })
-  } else {
-    command = new GetObjectCommand({
-      Bucket: bucketName,
-      Key: key,
-    })
-  }
+  const command =
+    action === "upload"
+      ? new PutObjectCommand({ Bucket: bucketName, Key: key, ContentType: contentType, ACL: "public-read" })
+      : new GetObjectCommand({ Bucket: bucketName, Key: key })
 
-  // Step 3: Generate signed URL
-  const signedUrl = await getSignedUrl(wasabiS3, command, {
-    expiresIn: 60 * 10, // 10 minutes
-  })
-  return signedUrl
+  return getSignedUrl(s3, command, { expiresIn: 60 * 10 }) // 10 minutes
 }
 
 /**
- * Deletes one or more media files from Wasabi
- * @param {string[]} mediaUrls - Array of full Wasabi URLs to delete
- * @returns {Promise<void>}
+ * Delete multiple media objects from Wasabi
  */
-export const deleteMediasFromWasabi = async (mediaUrls = []) => {
-  const wasabiS3 = new S3Client({
-    region: process.env.WASABI_REGION,
-    endpoint: process.env.WASABI_ENDPOINT,
-    credentials: {
-      accessKeyId: process.env.WASABI_ACCESS_KEY,
-      secretAccessKey: process.env.WASABI_SECRET_KEY,
-    },
-    forcePathStyle: true,
-  })
-
-  if (!Array.isArray(mediaUrls) || mediaUrls.length === 0) return
-
+export const deleteFromWasabi = async (urls = []) => {
+  if (!urls.length) return
+  const s3 = createWasabiClient()
   const bucket = process.env.WASABI_CHAT_MEDIA_BUCKET
 
-  // Extract keys from full Wasabi URLs
-  const keys = mediaUrls
-    .map((url) => {
-      const parts = url.split(".com/")
-      return parts[1] || "" // The part after '.com/' is the S3 key
+  const keys = urls
+    .map((u) => {
+      const parts = u.split(".com/")
+      return parts[1]
     })
     .filter(Boolean)
 
-  if (keys.length === 0) return
-
-  const deleteParams = {
-    Bucket: bucket,
-    Delete: {
-      Objects: keys.map((Key) => ({ Key })),
-      Quiet: false,
-    },
-  }
+  if (!keys.length) return
 
   try {
-    await wasabiS3.send(new DeleteObjectsCommand(deleteParams))
-    console.log(`Deleted ${keys.length} media file(s) from Wasabi.`)
-  } catch (error) {
-    console.error("Failed to delete media from Wasabi:", error)
+    await s3.send(
+      new DeleteObjectsCommand({
+        Bucket: bucket,
+        Delete: { Objects: keys.map((Key) => ({ Key })) },
+      })
+    )
+  } catch (err) {
+    console.error("Wasabi Delete Error:", err)
     throw new Error("Failed to delete media from Wasabi")
   }
 }
 
-export const extractWasabiKey = (url) => {
-  try {
-    const base = "https://project.s3.wasabisys.com/"
-    return url.startsWith(base) ? url.replace(base, "") : null
-  } catch (e) {
-    return null
-  }
-}
-
-/**
- * Notify a user via email and in-app notification
- * @param {Object} options
- * @param {String} options.userId - MongoDB user ID
- * @param {String} options.subject - Email subject
- * @param {String} options.message - Notification message
- * @param {String} options.htmlBody - Optional rich HTML email body
- * @param {String} options.textBody - Optional plain text email body
- * @param {String} options.type - Notification type: "success", "error", "info", etc.
- * @param {Object} options.session - Optional Mongo session for transaction support
- */
-export const sendUserEmail = async ({ user, subject, message, htmlBody, textBody, type = "info", session = null }) => {
-  const defaultText = textBody || message
-  const defaultHTML =
-    htmlBody ||
-    `
-    <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #eee;">
-      <p>Hello ${user.username},</p>
-      <p>${message}</p>
-      <p style="font-size: 12px; color: #777;">&copy; ${new Date().getFullYear()} LepGold</p>
-    </div>
-  `
-
-  // Send Email
-  await sendEmail({
-    to: user.email,
-    subject,
-    htmlBody: defaultHTML,
-    textBody: defaultText,
-  })
-
-  // Push In-App Notification
-  await UserNotifications.findOneAndUpdate(
-    { _id: user._id },
-    {
-      $push: {
-        notifications: {
-          message,
-          type,
-          createdAt: new Date(),
-        },
-      },
-    },
-    {
-      upsert: true,
-      new: true,
-      setDefaultsOnInsert: true,
-      ...(session ? { session } : {}),
-    }
-  )
-}
+/* ----------------------------------------------------------
+ *  MIME TYPES
+ * ---------------------------------------------------------- */
 
 export const mimeFromExt = (ext) => {
-  switch (ext) {
-    case ".jpg":
-    case ".jpeg":
-    case ".png":
-    case ".gif":
-      return "image/" + ext.replace(".", "")
-    case ".mp4":
-    case ".mov":
-    case ".wmv":
-      return "video/" + ext.replace(".", "")
-    case ".mp3":
-    case ".wav":
-      return "audio/" + ext.replace(".", "")
-    default:
-      return "application/octet-stream"
+  const lookup = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+  }
+  return lookup[ext.toLowerCase()] || "application/octet-stream"
+}
+
+/* ----------------------------------------------------------
+ *  USER / ORG NOTIFICATIONS
+ * ---------------------------------------------------------- */
+
+/**
+ * Send email + internal notification via unified Notification model
+ */
+export const sendSystemNotification = async ({
+  recipients,
+  subject,
+  message,
+  type = "system_alert",
+  from = { userName: "System", model: "System" },
+  actions = [],
+  orgContext = {},
+}) => {
+  try {
+    // Save internal notification(s)
+    const payloads = (Array.isArray(recipients) ? recipients : [recipients]).map((id) => ({
+      recipient: { _id: id, model: orgContext.model || "OrgUser" },
+      sender: from,
+      subject,
+      message,
+      type,
+      actions,
+      orgContext,
+    }))
+
+    await Notification.insertMany(payloads)
+
+    // Send socket event
+    for (const id of Array.isArray(recipients) ? recipients : [recipients]) {
+      privateNamespace.to(`${orgContext.model || "org"}:${id}`).emit("notification", {
+        subject,
+        message,
+        type,
+        from,
+        actions,
+        timestamp: new Date(),
+      })
+    }
+
+    // Optional: Send email
+    if (orgContext.email) {
+      const htmlBody = `
+        <div style="font-family:Arial;padding:20px;">
+          <h2>${subject}</h2>
+          <p>${message}</p>
+          <p style="font-size:12px;color:#777;">© ${new Date().getFullYear()} ${process.env.PROJECT_NAME}</p>
+        </div>`
+      await sendEmail({ to: orgContext.email, subject, htmlBody, textBody: message })
+    }
+  } catch (error) {
+    console.error("sendSystemNotification Error:", error)
+    throw new Error("Notification dispatch failed")
   }
 }
 
-export const mapDiditStatus = (s) => {
-  const v = String(s || "").toLowerCase()
-  if (["not started", "unknown", "pending", "created"].includes(v)) return "pending"
-  if (["in progress", "started", "user_in_progress"].includes(v)) return "user_in_progress"
-  if (["in review", "review", "needs_review"].includes(v)) return "needs_review"
-  if (["approved", "verified", "completed", "success"].includes(v)) return "verified"
-  if (["declined", "rejected", "failed", "error"].includes(v)) return "failed"
-  if (["canceled", "cancelled", "abandoned"].includes(v)) return "canceled"
-  if (["expired", "timeout"].includes(v)) return "expired"
+/* ----------------------------------------------------------
+ *  STATUS MAPPERS
+ * ---------------------------------------------------------- */
+
+export const mapVerificationStatus = (status) => {
+  const s = String(status || "").toLowerCase()
+  if (["approved", "verified", "success"].includes(s)) return "verified"
+  if (["declined", "rejected", "failed"].includes(s)) return "failed"
+  if (["in progress", "review"].includes(s)) return "in_review"
+  if (["pending", "created"].includes(s)) return "pending"
+  if (["cancelled", "abandoned"].includes(s)) return "canceled"
+  if (["expired", "timeout"].includes(s)) return "expired"
   return "pending"
 }
-
-
-export const TERMINAL_KYC_STATUSES = new Set(["verified", "failed", "expired", "abandoned"])

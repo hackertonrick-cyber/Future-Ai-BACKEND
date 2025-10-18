@@ -1,20 +1,169 @@
 import asyncHandler from "express-async-handler"
 import generateToken from "../utils/generateToken.js"
-import User from "../models/userModel.js"
 import { ERROR_RESPONSE, generateSignedUrl } from "../utils/constants.js"
 import { differenceInCalendarYears, parse } from "date-fns"
-import generateUserAuthData from "../utils/generateUserAuthData.js"
-import { onlineUsers, privateNamespace } from "../utils/socket.js"
 import mongoose from "mongoose"
-import UserNotifications from "../models/userNotificationsModel.js"
-import Redis from "../models/redisModel.js"
 import { sendEmail } from "../middleware/s3.js"
-import KYC from "../models/kycModel.js"
-import { format } from "util"
-import { Storage } from "@google-cloud/storage"
-import path from "path"
 import { sendNotification } from "../utils/notificationService.js"
 import Counter from "../models/counterModel.js"
+import Organization from "../models/organizationModel.js"
+import OrgUser from "../models/orgUserModel.js"
+import AccessRequest from "../models/accessRequestModel.js"
+import Redis from "../models/RedisModel.js"
+
+const createOrganizationInvite = asyncHandler(async (req, res) => {
+  const { companyName, country, address, contactEmail, contactPhone, invitedBy } = req.body
+
+  // Basic validation
+  if (!companyName || !contactEmail || !country) {
+    return res.status(400).json({ message: "Missing required organization fields." })
+  }
+
+  // Generate a unique token (you can also hash this before saving)
+  const token = crypto.randomBytes(20).toString("hex")
+
+  // Construct temporary invite data
+  const inviteData = {
+    companyName,
+    country,
+    address,
+    contactEmail,
+    contactPhone,
+    invitedBy,
+  }
+
+  // Store in RedisModel with TTL (5 minutes default)
+  await Redis.create({
+    key: token,
+    value: inviteData,
+  })
+
+  // Generate registration link
+  const registrationLink = `${process.env.FRONTEND_URL}/org/register?token=${token}`
+
+  // Send notification (customize this to your own notification system)
+  await sendNotification({
+    userEmail: contactEmail,
+    type: "organization_invite",
+    subject: `You're invited to join MedSync`,
+    message: `Hello,  
+You’ve been invited to register your hospital or clinic on the MedSync Network.  
+Click the link below to complete your registration:  
+${registrationLink}
+
+This link will expire in 5 minutes for security reasons.`,
+    from: {
+      userName: "MedSync System",
+      avatar: process.env.ADMIN_IMAGE,
+    },
+    actions: [
+      {
+        type: "REGISTER_ORG",
+        text: "Complete Registration",
+        url: registrationLink,
+      },
+    ],
+  })
+
+  // Return success + link for audit
+  res.status(201).json({
+    message: "Organization invite created successfully.",
+    token,
+    registrationLink,
+  })
+})
+
+const registerOrganization = asyncHandler(async (req, res) => {
+  const { address, contactEmail, branchName, adminEmail, adminPassword, inviteToken } = req.body
+
+  // 🔹 Validate invite token via RedisModel
+  let redisRecord = null
+  if (inviteToken) {
+    redisRecord = await Redis.findOne({ key: inviteToken })
+    if (!redisRecord) {
+      return res.status(403).json({ message: "Invalid or expired invite token." })
+    }
+  }
+
+  const session = await mongoose.startSession()
+  session.startTransaction()
+
+  try {
+    // If invite data exists, use it as authoritative source
+    const inviteData = redisRecord?.value || {}
+
+    const existingOrg = await Organization.findOne({
+      contactEmail: inviteData.contactEmail || contactEmail,
+    }).session(session)
+    if (existingOrg) throw new Error("Organization already registered.")
+
+    const orgCount = await Organization.countDocuments().session(session)
+    const companyCode = "HSP" + String(orgCount + 1).padStart(3, "0")
+    const branchCode = "BR001"
+
+    const [createdOrg] = await Organization.create(
+      [
+        {
+          companyCode,
+          companyName: inviteData.companyName,
+          country: inviteData.country,
+          address: inviteData.address,
+          contactEmail: inviteData.contactEmail,
+          contactPhone: inviteData.contactPhone,
+          registrationStatus: "approved",
+          verified: true,
+          verifiedAt: new Date(),
+          branches: [
+            {
+              branchCode,
+              branchName: branchName || "MB",
+              address,
+              email: inviteData.contactEmail,
+              phone: inviteData.contactPhone,
+            },
+          ],
+        },
+      ],
+      { session }
+    )
+
+    const adminUser = await OrgUser.create(
+      [
+        {
+          companyCode,
+          branchCode,
+          username: adminEmail.toLowerCase(),
+          passwordHash: adminPassword,
+          role: "admin",
+          active: true,
+        },
+      ],
+      { session }
+    )
+
+    await Organization.findByIdAndUpdate(createdOrg._id, { primaryAdminUser: adminUser[0]._id }, { session })
+
+    // Optional: delete token after use
+    if (redisRecord) await redisRecord.deleteOne()
+
+    await session.commitTransaction()
+
+    res.status(201).json({
+      organization: {
+        _id: createdOrg._id,
+        companyCode,
+        companyName: createdOrg.companyName,
+        contactEmail: createdOrg.contactEmail,
+        token: generateToken(adminUser[0]._id),
+      },
+    })
+  } catch (err) {
+    await session.abortTransaction()
+    res.status(500).json({ message: err.message })
+  } finally {
+    session.endSession()
+  }
+})
 
 //#region @desc Register new user
 // @route POST /user
@@ -79,7 +228,6 @@ const registerUser = asyncHandler(async (req, res) => {
 
       await Counter.findOneAndUpdate({ key: "userCount" }, { $inc: { count: 1 } }, { upsert: true, new: true, session })
 
-     
       return { createdUser }
     })
 
@@ -122,7 +270,6 @@ const registerUser = asyncHandler(async (req, res) => {
         customerId: createdUser.customerId,
         createdAt: createdUser.createdAt,
         updatedAt: createdUser.updatedAt,
-        kycVerification: createdUser.kycVerification,
         token: generateToken(createdUser._id),
       },
     })
@@ -136,368 +283,608 @@ const registerUser = asyncHandler(async (req, res) => {
 })
 //#endregion
 
-//#region @desc Auth user & get token
-// @route POST /user/login
-// @access Public
-const authUser = asyncHandler(async (req, res) => {
-  const { userName, password } = req.body
+const registerOrgUser = asyncHandler(async (req, res) => {
+  const { username, password, role, branchCode } = req.body
+  const admin = req.user
 
-  try {
-    const user = await User.findOne({
-      $or: [{ userName }, { email: userName }],
-    })
-      .collation({
-        locale: "en_US",
-        strength: 2,
-      })
-      .populate([ { path: "country", select: "-createdBy -updatedAt" }])
-
-    if (!user) {
-      return res.status(401).json({
-        error: ERROR_RESPONSE.FAILED_AUTH,
-        message: "Authentication failed",
-      })
-    }
-
-    const isMatch = await user.matchPassword(password)
-    if (!isMatch) {
-      return res.status(401).json({
-        error: ERROR_RESPONSE.FAILED_AUTH,
-        message: "Authentication failed",
-      })
-    }
-
-    // Handle duplicate sessions
-    if (onlineUsers.has(user._id.toString())) {
-      console.log("Online users logout triggered")
-
-      privateNamespace.to(user._id.toString()).emit("logoutUser")
-
-      // Add a timeout fallback in case the user doesn't disconnect gracefully
-      await new Promise((resolve) => setTimeout(resolve, 5000))
-    }
-
-  } catch (error) {
-    console.error("Auth error:", error)
-
-    res.status(500).json({
-      error: ERROR_RESPONSE.FAILED,
-      message: "An internal error occurred",
-    })
+  // 🧩 Validate Inputs
+  if (!username || !password || !role) {
+    return res.status(400).json({ message: "Username, password, and role are required." })
   }
-})
-//#endregion
 
-//#region @desc Auth user & get user Data
-// @route GET /auth/auth-data
-// @access Private
-const getAuthData = asyncHandler(async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id)
-      .populate([ { path: "country", select: "-createdBy -updatedAt" }])
-      .lean()
-    if (!user) {
-      return res.status(404).json({
-        error: ERROR_RESPONSE.FAILED_AUTH,
-        message: "User not found",
-      })
-    }
-    // user.avatar = await generateSignedUrl(user.avatar, process.env.WASABI_PROFILE_IMAGE_BUCKET)
-    res.status(200).json(generateUserAuthData(user))
-  } catch (error) {
-    res.status(500).json({
-      error: ERROR_RESPONSE.FAILED,
-      message: `${error}`,
-    })
+  // 🛡️ Role Check
+  if (!["admin", "super-admin"].includes(admin.role)) {
+    return res.status(403).json({ message: "Only admins or super-admins can create users." })
   }
-})
-//#endregion
-
-//#region @desc Get User Profile
-// @route Get /user/profile
-// @access Private
-const getUserProfile = asyncHandler(async (req, res) => {
-  try {
-    const id = req.body.id ? req.body.id : req.user._id
-    const user = await User.findById(id).select("-password -customerId")
-    if (user) {
-      res.json(user)
-    } else {
-      res.status(404)
-      throw new Error(ERROR_RESPONSE.USER_NOT_FOUND)
-    }
-  } catch (error) {
-    res.status(500).json({
-      error: ERROR_RESPONSE.FAILED,
-      message: `${error}`,
-    })
-  }
-})
-//#endregion
-
-//#region @desc Update User Profile
-// @route PUT /user/profile
-// @access Private
-const updateUserProfile = asyncHandler(async (req, res) => {
-  const { firstName, lastName, gender, dob, email, country, newsLetters, password } = req.body
 
   const session = await mongoose.startSession()
   session.startTransaction()
 
   try {
-    const id = req.body.id ? req.body.id : req.user._id
-    const user = await User.findById(id).session(session).select("-password -customerId")
+    // Check duplicate user in same company
+    const existingUser = await OrgUser.findOne({
+      username: username.toLowerCase(),
+      companyCode: admin.companyCode,
+    }).session(session)
 
-    if (!user) {
-      await session.abortTransaction()
-      session.endSession()
-      res.status(404)
-      throw new Error(ERROR_RESPONSE.USER_NOT_FOUND)
+    if (existingUser) {
+      throw new Error("Username already exists in your organization.")
     }
 
-    const isEmailChanged = email && user.email !== email
-
-    user.firstName = firstName || user.firstName
-    user.lastName = lastName || user.lastName
-    user.gender = gender || user.gender
-    user.dob = dob || user.dob
-    user.email = email || user.email
-    user.country = country || user.country
-    user.newsLetters = newsLetters || user.newsLetters
-
-    if (password) {
-      user.password = password
+    // Ensure admin is not trying to create a super-admin
+    if (role === "super-admin" && admin.role !== "super-admin") {
+      throw new Error("Only super-admins can create another super-admin.")
     }
 
-    if (isEmailChanged) user.emailVerified = false
+    // Create new org user
+    const newUser = await OrgUser.create(
+      [
+        {
+          companyCode: admin.companyCode,
+          branchCode: branchCode || admin.branchCode,
+          username: username.toLowerCase(),
+          passwordHash: password,
+          role,
+          createdBy: admin._id,
+          active: true,
+        },
+      ],
+      { session }
+    )
 
-    const updateUser = await user.save({ session })
-    await updateUser.populate([
-      { path: "country", select: "-createdBy -updatedAt" },
-    ])
     await session.commitTransaction()
-    res.json(updateUser)
 
-    session.endSession()
+    res.status(201).json({
+      message: "Organization user created successfully.",
+      user: {
+        _id: newUser[0]._id,
+        username: newUser[0].username,
+        role: newUser[0].role,
+        companyCode: newUser[0].companyCode,
+        branchCode: newUser[0].branchCode,
+        createdBy: admin.username,
+      },
+    })
   } catch (error) {
     await session.abortTransaction()
+    console.error("OrgUser Registration Error:", error)
+    res.status(500).json({ message: error.message })
+  } finally {
     session.endSession()
+  }
+})
 
+const registerSuperAdmin = asyncHandler(async (req, res) => {
+  const { username, password } = req.body
+
+  if (!username || !password) {
+    return res.status(400).json({ message: "Username and password are required" })
+  }
+
+  const session = await mongoose.startSession()
+  session.startTransaction()
+
+  try {
+    // Ensure no duplicate super-admin exists
+    const existing = await OrgUser.findOne({ username: username.toLowerCase(), role: "super-admin" }).session(session)
+    if (existing) {
+      throw new Error("A super-admin with this username already exists.")
+    }
+
+    // Create super-admin (no companyCode or branch restrictions)
+    const superAdmin = await OrgUser.create(
+      [
+        {
+          username: username.toLowerCase(),
+          passwordHash: password,
+          role: "super-admin",
+          companyCode: "SYS-ROOT",
+          branchCode: "GLOBAL",
+          active: true,
+        },
+      ],
+      { session }
+    )
+
+    await session.commitTransaction()
+
+    const token = generateToken(superAdmin[0]._id)
+
+    res.status(201).json({
+      message: "Super-admin registered successfully.",
+      user: {
+        _id: superAdmin[0]._id,
+        username: superAdmin[0].username,
+        role: superAdmin[0].role,
+        companyCode: superAdmin[0].companyCode,
+        branchCode: superAdmin[0].branchCode,
+        token,
+      },
+    })
+  } catch (error) {
+    await session.abortTransaction()
+    console.error("SuperAdmin Registration Error:", error)
+    res.status(500).json({ message: error.message })
+  } finally {
+    session.endSession()
+  }
+})
+
+//#region @desc Auth user & get token
+// @route POST /org/login
+// @access Public
+const authOrgUser = asyncHandler(async (req, res) => {
+  const { username, password, companyCode, branchCode } = req.body
+
+  try {
+    if (!username || !password || !companyCode) {
+      return res.status(400).json({
+        error: ERROR_RESPONSE.INVALID_REQUEST,
+        message: "Username, password, and company code are required.",
+      })
+    }
+
+    // 🔹 Step 1: Find Org User by company + username
+    const user = await OrgUser.findOne({
+      username: username.toLowerCase(),
+      companyCode,
+    }).collation({ locale: "en_US", strength: 2 })
+
+    if (!user) {
+      return res.status(401).json({
+        error: ERROR_RESPONSE.FAILED_AUTH,
+        message: "Invalid username or password.",
+      })
+    }
+
+    // 🔹 Step 2: Verify password
+    const isMatch = await user.matchPassword(password)
+    if (!isMatch) {
+      return res.status(401).json({
+        error: ERROR_RESPONSE.FAILED_AUTH,
+        message: "Invalid username or password.",
+      })
+    }
+
+    // 🔹 Step 3: Ensure organization is active
+    const org = await Organization.findOne({ companyCode, isActive: true })
+    if (!org) {
+      return res.status(403).json({
+        message: "Organization inactive or not found.",
+      })
+    }
+
+    // 🔹 Step 4: Update login activity
+    if (!user.loginHistory) user.loginHistory = []
+    user.lastLogin = new Date()
+    user.loginHistory.push({
+      ip: req.ip|| "192.168.40.40",
+      device: req.headers["user-agent"]|| "doctor-device",
+      timestamp: new Date(),
+    })
+    await user.save()
+
+    // 🔹 Step 5: Generate org auth payload
+    const authData = generateOrgAuthData(user)
+
+    // 🔹 Step 6: Respond
+    res.status(200).json({
+      message: "Login successful",
+      user: authData,
+    })
+  } catch (error) {
+    console.error("Auth error:", error)
     res.status(500).json({
       error: ERROR_RESPONSE.FAILED,
-      message: `${error}`,
+      message: "Internal authentication error",
     })
   }
 })
 //#endregion
 
-//#region @desc Update User Profile image
-// @route POST /user/profile_image
-// @access Private
-const updateProfileImage = asyncHandler(async (req, res) => {
-  const bucket_key = {
-    type: process.env.GOOGLE_TYPE,
-    project_id: process.env.GOOGLE_PROJECT_ID,
-    private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
-    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    client_id: process.env.GOOGLE_BUCKET_CLIENT_ID,
-    auth_uri: process.env.GOOGLE_AUTH_URI,
-    token_uri: process.env.GOOGLE_TOKEN_URI,
-    auth_provider_x509_cert_url: process.env.GOOGLE_AUTH_PROVIDER_CERT_URL,
-    client_x509_cert_url: process.env.GOOGLE_CLIENT_CERT_URL,
+const authPatient = asyncHandler(async (req, res) => {
+  const { username, password } = req.body
+
+  if (!username || !password) {
+    return res.status(400).json({ message: "Username and password are required." })
   }
-  const storage = new Storage({
-    projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
-    credentials: bucket_key,
-  })
-  const bucket = storage.bucket(process.env.GOOGLE_CLOUD_BUCKET)
+
   try {
-    if (!req.file) {
-      res.status(400)
-      res.json({
-        error: ERROR_RESPONSE.FAILED,
-        message: "Please upload a file!",
+    // 🔍 Find patient by username OR email
+    const patient = await Patient.findOne({
+      $or: [{ username }, { email: username }],
+    })
+
+    if (!patient) {
+      return res.status(401).json({
+        error: ERROR_RESPONSE.FAILED_AUTH,
+        message: "Invalid username or password.",
       })
     }
 
-    const fileTypes = /jpg|jpeg|png/
-    const extName = fileTypes.test(path.extname(req.file.originalname).toLowerCase())
-    const mimetype = fileTypes.test(req.file.mimetype)
-
-    if (!extName | !mimetype) {
-      res.status(400)
-      res.json({
-        error: ERROR_RESPONSE.FAILED,
-        message: "Please upload images only!",
+    // 🔑 Validate password
+    const isMatch = await bcrypt.compare(password, patient.passwordHash)
+    if (!isMatch) {
+      return res.status(401).json({
+        error: ERROR_RESPONSE.FAILED_AUTH,
+        message: "Invalid username or password.",
       })
     }
-    const [files] = await bucket.getFiles({ prefix: `${req.user._id}` })
-    await Promise.all(files.map((file) => file.delete()))
 
-    // Create a new blob in the bucket and upload the file data.
-    const blob = bucket.file(`${req.user._id}${path.extname(req.file.originalname).toLowerCase()}`)
-    const blobStream = blob.createWriteStream({
-      resumable: false,
-      metadata: {
-        cacheControl: "public, max-age=0",
+    // 🕒 Update login activity
+    patient.lastLogin = new Date()
+    patient.loginHistory.push({
+      ip: req.ip|| "192.168.10.10",
+      device: req.headers["user-agent"]|| "test device",
+      timestamp: new Date(),
+    })
+    await patient.save()
+
+    // 🎫 Generate clean response data + JWT
+    const authData = generatePatientAuthData(patient)
+
+    res.status(200).json({
+      message: "Login successful",
+      patient: authData,
+    })
+  } catch (error) {
+    console.error("Patient Auth Error:", error)
+    res.status(500).json({
+      error: ERROR_RESPONSE.FAILED,
+      message: "An internal error occurred while logging in.",
+    })
+  }
+})
+
+const getOrgUserProfile = asyncHandler(async (req, res) => {
+  try {
+    const id = req.body.id ? req.body.id : req.user._id
+
+    const user = await OrgUser.findById(id).select("-passwordHash -__v").lean()
+
+    if (!user) {
+      return res.status(404).json({
+        error: ERROR_RESPONSE.USER_NOT_FOUND,
+        message: "Organization user not found",
+      })
+    }
+
+    // Optional: attach company/branch details for UI context
+    res.status(200).json({
+      ...user,
+      isAdmin: user.role === "admin",
+      companyCode: user.companyCode,
+      branchCode: user.branchCode,
+      role: user.role,
+    })
+  } catch (error) {
+    res.status(500).json({
+      error: ERROR_RESPONSE.FAILED,
+      message: `Failed to retrieve org user profile: ${error}`,
+    })
+  }
+})
+
+const getPatientProfile = asyncHandler(async (req, res) => {
+  try {
+    const patientId = req.params.id || req.user._id
+    const requester = req.user
+
+    const patient = await Patient.findById(patientId)
+      .select("-passwordHash -__v")
+      .populate([
+        { path: "country", select: "name code" },
+        { path: "restrictedAccess.doctors", select: "username role companyCode branchCode" },
+      ])
+      .lean()
+
+    if (!patient) {
+      return res.status(404).json({
+        error: ERROR_RESPONSE.USER_NOT_FOUND,
+        message: "Patient not found",
+      })
+    }
+
+    // 🔒 Access Control Logic
+    const isSelf = requester._id.toString() === patient._id.toString()
+    const isDoctorAuthorized =
+      patient.restrictedAccess?.doctors?.some(
+        (doc) => doc._id.toString() === requester._id.toString()
+      ) || requester.role === "admin"
+
+    const isMedicalStaff = ["doctor", "nurse", "admin"].includes(requester.role)
+
+    if (!isSelf && !isDoctorAuthorized && !isMedicalStaff) {
+      return res.status(403).json({
+        error: ERROR_RESPONSE.ACCESS_DENIED,
+        message: "You are not authorized to view this patient’s record",
+      })
+    }
+
+    // ✅ Response
+    res.status(200).json({
+      patient,
+      accessedBy: {
+        userId: requester._id,
+        role: requester.role || "patient",
+        companyCode: requester.companyCode || null,
+        selfAccess: isSelf,
+      },
+    })
+  } catch (error) {
+    console.error("getPatientProfile error:", error)
+    res.status(500).json({
+      error: ERROR_RESPONSE.FAILED,
+      message: `Failed to retrieve patient profile: ${error.message}`,
+    })
+  }
+})
+
+const requestAccessFromOrganization = asyncHandler(async (req, res) => {
+  const { targetOrgCode, reasonForAccess, priority } = req.body
+
+  // Validate fields
+  if (!targetOrgCode || !reasonForAccess) {
+    return res.status(400).json({ message: "Organization code and reason for access are required." })
+  }
+
+  const requester = req.user
+  if (!["doctor", "nurse", "admin"].includes(requester.role)) {
+    return res.status(403).json({ message: "Only medical professionals can request access." })
+  }
+
+  // Validate organization exists
+  const organization = await Organization.findOne({ companyCode: targetOrgCode, isActive: true })
+  if (!organization) {
+    return res.status(404).json({ message: "Organization not found or inactive." })
+  }
+
+  // Prevent duplicate open requests
+  const existingRequest = await AccessRequest.findOne({
+    doctorId: requester._id,
+    orgCode: targetOrgCode,
+    status: { $in: ["scheduled", "confirmed", "in_progress"] },
+  })
+  if (existingRequest) {
+    return res.status(409).json({ message: "Access already requested or pending with this organization." })
+  }
+
+  // Create the request
+  const newRequest = await AccessRequest.create({
+    doctorId: requester._id,
+    orgCode: targetOrgCode,
+    branchCode: null,
+    reasonForVisit: reasonForAccess,
+    visitType: "consultation",
+    priority: priority || "normal",
+    status: "scheduled",
+    createdBy: requester._id,
+  })
+
+  // Notify the organization’s admin(s)
+  const orgAdmins = await Organization.aggregate([
+    { $match: { companyCode: targetOrgCode } },
+    {
+      $lookup: {
+        from: "orgusers",
+        localField: "companyCode",
+        foreignField: "companyCode",
+        as: "admins",
+      },
+    },
+    { $unwind: "$admins" },
+    { $match: { "admins.role": "admin" } },
+    { $project: { "admins._id": 1, "admins.username": 1 } },
+  ])
+
+  for (const admin of orgAdmins) {
+    await sendNotification({
+      userId: admin.admins._id,
+      type: "access_request_org",
+      subject: "New Access Request",
+      message: `${requester.username} from ${requester.companyCode} has requested permission to access patient data at ${organization.companyName}.`,
+      from: {
+        _id: requester._id,
+        userName: requester.username,
+        avatar: process.env.ADMIN_IMAGE,
+      },
+      actions: [
+        {
+          type: "REVIEW_ACCESS",
+          text: "Review Request",
+          url: `${process.env.FRONTEND_URL}/admin/access-requests`,
+        },
+      ],
+    })
+  }
+
+  res.status(201).json({
+    message: `Access request sent to ${organization.companyName}.`,
+    request: {
+      _id: newRequest._id,
+      orgCode: newRequest.orgCode,
+      reasonForVisit: newRequest.reasonForVisit,
+      status: newRequest.status,
+    },
+  })
+})
+
+const listAccessRequests = asyncHandler(async (req, res) => {
+  const requester = req.user
+
+  if (requester.role !== "admin") {
+    return res.status(403).json({ message: "Access denied: Admins only." })
+  }
+
+  try {
+    // Admin can only view requests within their own organization
+    const { status } = req.query // optional filter
+
+    const query = {
+      orgCode: requester.companyCode,
+    }
+
+    if (status) query.status = status // e.g., ?status=scheduled or confirmed
+
+    const requests = await AccessRequest.find(query)
+      .populate([
+        { path: "doctorId", select: "username role companyCode branchCode" },
+        { path: "patientId", select: "firstName lastName email" },
+      ])
+      .sort({ createdAt: -1 })
+      .lean()
+
+    if (!requests.length) {
+      return res.status(404).json({ message: "No access requests found for your organization." })
+    }
+
+    res.status(200).json({
+      count: requests.length,
+      requests,
+    })
+  } catch (error) {
+    console.error("List Access Requests Error:", error)
+    res.status(500).json({
+      message: "Failed to retrieve access requests.",
+      error: error.message,
+    })
+  }
+})
+
+const approveAccessRequest = asyncHandler(async (req, res) => {
+  const { id } = req.params
+  const { decision } = req.body // "approved" or "rejected"
+  const admin = req.user
+
+  if (!["approved", "rejected"].includes(decision)) {
+    return res.status(400).json({ message: "Decision must be 'approved' or 'rejected'." })
+  }
+
+  try {
+    const accessRequest = await AccessRequest.findById(id)
+      .populate("doctorId", "username companyCode branchCode")
+      .populate("patientId", "firstName lastName restrictedAccess")
+      .lean()
+
+    if (!accessRequest) {
+      return res.status(404).json({ message: "Access request not found." })
+    }
+
+    // Ensure admin is approving within their organization
+    if (accessRequest.orgCode !== admin.companyCode) {
+      return res.status(403).json({ message: "You cannot modify requests outside your organization." })
+    }
+
+    // Update status
+    const updated = await AccessRequest.findByIdAndUpdate(
+      id,
+      { status: decision === "approved" ? "confirmed" : "cancelled", updatedBy: admin._id },
+      { new: true }
+    )
+
+    // If approved, grant access
+    if (decision === "approved" && accessRequest.patientId) {
+      await Patient.findByIdAndUpdate(accessRequest.patientId._id, {
+        $addToSet: { "restrictedAccess.doctors": accessRequest.doctorId._id },
+      })
+
+      await sendNotification({
+        userId: accessRequest.doctorId._id,
+        type: "access_approved",
+        subject: "Access Approved",
+        message: `Your access request for patient ${accessRequest.patientId.firstName} ${accessRequest.patientId.lastName} has been approved by ${admin.username}.`,
+        from: {
+          _id: admin._id,
+          userName: admin.username,
+          avatar: process.env.ADMIN_IMAGE,
+        },
+      })
+    }
+
+    // If rejected, notify doctor
+    if (decision === "rejected") {
+      await sendNotification({
+        userId: accessRequest.doctorId._id,
+        type: "access_denied",
+        subject: "Access Request Denied",
+        message: `Your request for access was denied by ${admin.username}.`,
+        from: {
+          _id: admin._id,
+          userName: admin.username,
+          avatar: process.env.ADMIN_IMAGE,
+        },
+      })
+    }
+
+    res.status(200).json({
+      message: `Access request ${decision === "approved" ? "approved" : "rejected"} successfully.`,
+      updated,
+    })
+  } catch (error) {
+    console.error("Approve Access Error:", error)
+    res.status(500).json({
+      message: "Failed to process access request.",
+      error: error.message,
+    })
+  }
+})
+
+const disapproveAccessRequest = asyncHandler(async (req, res) => {
+  const { id } = req.params
+  const admin = req.user
+
+  try {
+    const accessRequest = await AccessRequest.findById(id)
+      .populate("doctorId", "username companyCode branchCode")
+      .populate("patientId", "firstName lastName restrictedAccess")
+      .lean()
+
+    if (!accessRequest) {
+      return res.status(404).json({ message: "Access request not found." })
+    }
+
+    // ✅ Ensure admin has the right organization
+    if (accessRequest.orgCode !== admin.companyCode) {
+      return res.status(403).json({ message: "You cannot modify requests outside your organization." })
+    }
+
+    // ✅ Revoke doctor’s access
+    await Patient.findByIdAndUpdate(accessRequest.patientId._id, {
+      $pull: { "restrictedAccess.doctors": accessRequest.doctorId._id },
+    })
+
+    // ✅ Mark AccessRequest as revoked
+    const updated = await AccessRequest.findByIdAndUpdate(
+      id,
+      { status: "revoked", updatedBy: admin._id, updatedAt: new Date() },
+      { new: true }
+    )
+
+    // ✅ Notify doctor
+    await sendNotification({
+      userId: accessRequest.doctorId._id,
+      type: "access_revoked",
+      subject: "Access Revoked",
+      message: `Your access to patient ${accessRequest.patientId.firstName} ${accessRequest.patientId.lastName} has been revoked by ${admin.username}.`,
+      from: {
+        _id: admin._id,
+        userName: admin.username,
+        avatar: process.env.ADMIN_IMAGE,
       },
     })
 
-    blobStream.on("error", (err) => {
-      res.status(500)
-      res.json({
-        error: ERROR_RESPONSE.FAILED,
-        message: err.message,
-      })
+    res.status(200).json({
+      message: `Access revoked successfully for doctor ${accessRequest.doctorId.username}.`,
+      updated,
     })
-
-    blobStream.on("finish", async (data) => {
-      const publicUrl = format(`${blob.storage.apiEndpoint}/${process.env.GOOGLE_CLOUD_BUCKET}/${blob.name}`)
-      const user = await User.findOneAndUpdate({ _id: req.user._id }, { $set: { avatar: publicUrl } }, { new: true })
-
-      res.json(generateUserAuthData(user))
-    })
-
-    blobStream.end(req.file.buffer)
-  } catch (err) {
-    res.status(500)
-    res.json({
-      error: ERROR_RESPONSE.FAILED,
-      message: `Could not upload the file: ${req.file.originalname}. ${err}`,
-    })
-  }
-})
-//#endregion
-
-//#region @desc Get user temp data
-// @route Get /user/get-temp-user-data
-// @access Private
-const getUserTempData = asyncHandler(async (req, res) => {
-  const { token } = req.query
-  try {
-    const tempUserData = req.data
-
-    if (tempUserData) {
-      await Redis.deleteOne({ key: `sign_in:${token}` })
-
-      return res.json({
-        success: true,
-        userData: tempUserData,
-      })
-    }
-
-    return res.json({ success: false, message: "Temp user data not found" })
   } catch (error) {
-    console.error("Error fetching temp user data:", error)
-    return res.status(500).json({
-      success: false,
-      message: "Error fetching user data",
+    console.error("Disapprove Access Error:", error)
+    res.status(500).json({
+      message: "Failed to revoke access.",
+      error: error.message,
     })
   }
 })
-//#endregion
-
-//#region @desc Send OTP for Email Verification
-// @route POST /user/send-verification-otp
-// @access Private
-const sendVerificationOtp = asyncHandler(async (req, res) => {
-  const { type, email } = req.body // type: "email", and target email
-
-  if (!["email"].includes(type) || !email) {
-    return res.status(400).json({ success: false, message: "Invalid verification type or missing email" })
-  }
-
-  const user = req.user
-  const normalizedEmail = email.trim().toLowerCase()
-  const query =  { email: normalizedEmail, emailVerified: true }
-
-  const existingUser = await User.findOne(query)
-
-  if (existingUser && String(existingUser._id) !== String(user._id)) {
-    return res.status(400).json({
-      success: false,
-      message: `This ${type} is already in use by another verified account.`,
-    })
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000)
-  const redisKey = `verify_${type}:${normalizedEmail}`
-
-  await Redis.findOneAndUpdate({ key: redisKey }, { value: otp, createdAt: new Date() }, { upsert: true, new: true, setDefaultsOnInsert: true })
-
-  const htmlBody = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px;">
-      <h2 style="color: #333;">Verification Code</h2>
-      <p>Hello,</p>
-      <p>Your OTP code for verifying your email address is:</p>
-      <h1 style="color: #007BFF; font-size: 32px; letter-spacing: 2px;">${otp}</h1>
-      <p>This code is valid for 5 minutes. If you didn’t request this, you can ignore this email.</p>
-      <br />
-      <p style="font-size: 12px; color: #777;">&copy; ${new Date().getFullYear()} PROJECT</p>
-    </div>
-  `
-
-  await sendEmail({
-    to: normalizedEmail,
-    subject: "Your Verification Code",
-    htmlBody,
-    textBody: `Your verification code is ${otp}. It will expire in 5 minutes.`,
-  })
-
-  return res.json({
-    success: true,
-    message: `OTP sent to user email successfully`,
-  })
-})
-//#endregion
-
-//#region @desc Verify OTP for Email Verification
-// @route POST /user/verify-otp
-// @access Private
-const verifyOtp = asyncHandler(async (req, res) => {
-  const { type, otp, email } = req.body // type: "email", and email to verify
-
-  if (!["email"].includes(type) || !otp || !email) {
-    return res.status(400).json({ success: false, message: "Invalid request" })
-  }
-
-  // Normalize for matching
-  const normalizedEmail = email.trim().toLowerCase()
-  const user = req.user
-
-  const query = { email: normalizedEmail, emailVerified: true }
-
-  const existingUser = await User.findOne(query)
-
-  if (existingUser && String(existingUser._id) !== String(user._id)) {
-    return res.status(400).json({
-      success: false,
-      message: `This ${type} is already in use by another verified account.`,
-    })
-  }
-
-  const redisKey = `verify_${type}:${normalizedEmail}`
-  const redisEntry = await Redis.findOne({ key: redisKey })
-
-  if (!redisEntry || String(redisEntry.value) !== String(otp)) {
-    return res.status(400).json({ success: false, message: "Invalid or expired OTP" })
-  }
-
-  if (type === "email") {
-    user.email = normalizedEmail
-    user.emailVerified = true
-  }
-  await user.save()
-  await Redis.deleteOne({ key: redisKey })
-
-  return res.json({
-    success: true,
-    user,
-    message: `Email  verified successfully`,
-  })
-})
-//#endregion
 
 //#region @desc Get paginated user notifications
 // @route GET /notifications
@@ -510,11 +897,11 @@ const getUserNotifications = asyncHandler(async (req, res) => {
 
   try {
     const [notifications, total] = await Promise.all([
-      UserNotifications.find({ userId })
+      Notification.find({ userId })
         .sort({ createdAt: -1 }) // Most recent first
         .skip(skip)
         .limit(limit),
-      UserNotifications.countDocuments({ userId }),
+      Notification.countDocuments({ userId }),
     ])
 
     res.json({
@@ -552,7 +939,7 @@ const updateNotificationViewState = asyncHandler(async (req, res) => {
   try {
     const userId = req.user._id
 
-    const result = await UserNotifications.updateMany(
+    const result = await Notification.updateMany(
       {
         _id: { $in: notification_ids },
         userId: userId,
@@ -597,7 +984,7 @@ const updateActionTaken = asyncHandler(async (req, res, next) => {
   session.startTransaction()
 
   try {
-    const notification = await UserNotifications.findOneAndUpdate(
+    const notification = await Notification.findOneAndUpdate(
       { _id: notification_id, userId },
       {
         $set: {
@@ -635,206 +1022,6 @@ const updateActionTaken = asyncHandler(async (req, res, next) => {
   } finally {
     session.endSession()
   }
-})
-//#endregion
-
-//#region @desc Generate Signed URL for Upload or Download
-// @route GET /user/media/signed-url?filename=somefile.jpg&type=media&action=upload&mime=image/jpeg
-// @access Private
-const getSignedURL = asyncHandler(async (req, res, next) => {
-  const { fileName, type, action, mime = "application/octet-stream" } = req.query
-  const sanitizeFilename = (name) => {
-    return name
-      .toLowerCase()
-      .trim()
-      .replace(/\s+/g, "-") // spaces to dashes
-      .replace(/[^a-z0-9._-]/g, "") // optional: strip non-safe characters
-  }
-  const safeFileName = sanitizeFilename(fileName)
-  const allowedTypes = ["profile", "media", "kyc"]
-  const allowedActions = ["upload", "download"]
-
-  if (!fileName || typeof fileName !== "string") {
-    return res.status(400).json({ error: "Invalid or missing 'filename' parameter" })
-  }
-
-  if (!allowedTypes.includes(type)) {
-    return res.status(400).json({
-      error: "Invalid 'type' parameter",
-      message: `Allowed types: ${allowedTypes.join(", ")}`,
-    })
-  }
-
-  if (!allowedActions.includes(action)) {
-    return res.status(400).json({
-      error: "Invalid 'action' parameter",
-      message: `Allowed actions: ${allowedActions.join(", ")}`,
-    })
-  }
-
-  const bucket = type === "profile" ? process.env.WASABI_PROFILE_IMAGE_BUCKET : process.env.WASABI_KYC_BUCKET
-
-  try {
-    const key = type === "profile" ? safeFileName : `${req.user.id}/${safeFileName}`
-    const signedUrl = await generateSignedUrl(key, bucket, action, mime)
-    const publicUrl = `https://${bucket}.${process.env.WASABI_SERVICE_URL}/${key}`
-    res.status(200).json({ signedUrl, publicUrl })
-  } catch (error) {
-    console.error("Error generating signed URL:", error)
-    error.statusCode = 500
-    next(error)
-  }
-})
-//#endregion
-
-//#region @desc Generate KYC FORM
-// @route POST /user/kyc
-// @access Private
-const submitKyc = asyncHandler(async (req, res) => {
-  const userId = req.user._id
-
-  const { personalInfo, idDocument, selfie, kycConfirm } = req.body
-
-  // Validate required fields
-  if (!personalInfo || !idDocument || !selfie || !kycConfirm) {
-    res.status(400)
-    throw new Error("Missing required KYC fields.")
-  }
-
-  const existing = await KYC.findOne({ user: userId })
-  if (existing) {
-    res.status(409)
-    throw new Error("KYC already submitted.")
-  }
-
-  const kyc = await KYC.create({
-    user: userId,
-    personalInfo,
-    idDocument,
-    selfie,
-    kycConfirm,
-  })
-  await User.updateOne(
-    { _id: userId },
-    {
-      $set: { kycVerification: "pending" },
-    }
-  )
-  res.status(201).json({ message: "KYC submitted successfully", kycVerification: "pending" })
-})
-//#endregion
-
-//#region @desc Review Kyc
-// @route POST /user/admin/kyc
-// @access Private
-const reviewKyc = asyncHandler(async (req, res) => {
-  const { action, notes, kycId } = req.body
-
-  if (!["approved", "rejected"].includes(action)) {
-    res.status(400)
-    throw new Error("Invalid review action. Must be 'approved' or 'rejected'.")
-  }
-
-  const kyc = await KYC.findById(kycId).populate("user", "_id email firstName lastName")
-
-  if (!kyc) {
-    res.status(404)
-    throw new Error("KYC record not found.")
-  }
-
-  if (kyc.status !== "pending") {
-    res.status(400)
-    throw new Error("This KYC has already been reviewed.")
-  }
-
-  kyc.status = action
-  kyc.adminNotes = notes || ""
-  kyc.reviewedAt = new Date()
-
-  await kyc.save()
-
-  // Send email notification to user
-  const { email, firstName } = kyc.user
-  const subject = `Your KYC has been ${action}`
-  const htmlBody = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px;">
-      <h2 style="color: #333;">KYC ${action.charAt(0).toUpperCase() + action.slice(1)}</h2>
-      <p>Hello ${firstName || "User"},</p>
-      <p>Your KYC verification has been <strong>${action}</strong>.</p>
-      ${action === "rejected" ? `<p>Reason: ${notes || "Not specified."}</p>` : ""}
-      <p>If you have any questions, feel free to contact our support(support@lepgold.com). </p>
-      <br />
-      <p style="font-size: 12px; color: #777;">&copy; ${new Date().getFullYear()} PROJECT</p>
-    </div>
-  `
-
-  const textBody = `Hello ${firstName || "User"}, your KYC verification has been ${action}. ${
-    action === "rejected" ? `Reason: ${notes || "Not specified."}` : ""
-  }`
-
-  await sendEmail({
-    to: email,
-    subject,
-    htmlBody,
-    textBody,
-  })
-  privateNamespace.to(kyc.user._id.toString()).emit("kycUpdate", { status: action })
-  res.json({
-    message: `KYC ${action}`,
-    kyc,
-  })
-})
-//#endregion
-
-//#region @desc Get kyc list for processing
-// @route GET /admin/kyc?status=pending&page=1&limit=15
-// @access Private
-const getAllKyc = asyncHandler(async (req, res) => {
-  const { page = 1, limit = 10, status } = req.query
-
-  const query = {}
-  if (status && ["pending", "approved", "rejected"].includes(status)) {
-    query.status = status
-  }
-
-  const total = await KYC.countDocuments(query)
-  const kycList = await KYC.find(query)
-    .populate("user", "firstName lastName email")
-    .lean()
-    .sort({ createdAt: -1 })
-    .skip((page - 1) * limit)
-    .limit(Number(limit))
-
-  const signedKycList = await Promise.all(
-    kycList.map(async (kyc) => {
-      const signedFront = await generateSignedUrl(kyc.idDocument.frontImageUrl, process.env.WASABI_KYC_BUCKET, "download")
-      const signedBack = await generateSignedUrl(kyc.idDocument.backImageUrl, process.env.WASABI_KYC_BUCKET, "download")
-      const signedPhoto = await generateSignedUrl(kyc.selfie?.photoUrl, process.env.WASABI_KYC_BUCKET, "download")
-      const signedVideo = await generateSignedUrl(kyc.selfie?.videoUrl, process.env.WASABI_KYC_BUCKET, "download")
-
-      return {
-        ...kyc.toObject(),
-        idDocument: {
-          ...kyc.idDocument,
-          frontImageUrl: signedFront,
-          backImageUrl: signedBack,
-        },
-        selfie: {
-          ...kyc.selfie,
-          photoUrl: signedPhoto,
-          videoUrl: signedVideo,
-        },
-      }
-    })
-  )
-
-  res.json({
-    total,
-    page: Number(page),
-    limit: Number(limit),
-    totalPages: Math.ceil(total / limit),
-    data: signedKycList,
-  })
 })
 //#endregion
 
@@ -951,22 +1138,22 @@ If this wasn't you, please secure your account immediately by contacting support
 //#endregion
 
 export {
-  authUser,
+  authOrgUser,
+  authPatient,
+  getOrgUserProfile,
+  getPatientProfile,
+  requestAccessFromOrganization,
+  listAccessRequests,
+  approveAccessRequest,
+  disapproveAccessRequest,
+  createOrganizationInvite,
+  registerOrganization,
   registerUser,
-  sendVerificationOtp,
-  verifyOtp,
-  getAllKyc,
-  getUserProfile,
+  registerSuperAdmin,
+  registerOrgUser,
   getUserNotifications,
-  updateUserProfile,
   updateActionTaken,
   updateNotificationViewState,
-  submitKyc,
-  reviewKyc,
   passwordResetInit,
   passwordReset,
-  getSignedURL,
-  updateProfileImage,
-  getAuthData,
-  getUserTempData,
 }
