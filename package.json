@@ -1,0 +1,60 @@
+{
+  "name": "boilerplate-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server",
+    "server": "nodemon -r dotenv/config server",
+    "client": "npm run dev --prefix frontend",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "build": "npm install"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rickal-Hamailton/boilerplate-backend.git"
+  },
+  "keywords": [],
+  "author": "Rickal Hamilton",
+  "license": "Proprietary",
+  "bugs": {
+    "url": "https://github.com/Rickal-Hamailton/boilerplate-backend/issues"
+  },
+  "homepage": "https://github.com/Rickal-Hamailton/boilerplate-backend#readme",
+  "engines": {
+    "node": "^14.16.0 || >=16.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^7.6.0",
+    "nodemon": "^3.1.4"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.911.0",
+    "@aws-sdk/client-ses": "^3.799.0",
+    "@aws-sdk/s3-request-presigner": "^3.911.0",
+    "@google-cloud/storage": "^6.9.5",
+    "@socket.io/admin-ui": "^0.5.1",
+    "colors": "^1.4.0",
+    "compression": "^1.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "express-async-handler": "^1.2.0",
+    "express-rate-limit": "^8.1.0",
+    "googleapis": "^140.0.1",
+    "helmet": "^8.1.0",
+    "hpp": "^0.2.3",
+    "joi": "^18.0.0",
+    "jsonwebtoken": "^9.0.0",
+    "moment": "^2.29.3",
+    "mongoose": "^8.19.1",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
+    "sharp": "^0.34.4",
+    "socket.io": "^4.8.1",
+    "stripe": "^16.12.0"
+  }
+}
