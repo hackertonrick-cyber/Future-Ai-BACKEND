@@ -25,5 +25,5 @@ redisSchema.methods.verifyCode = async function (candidateValue) {
   return bcrypt.compare(candidateValue, this.value)
 }
 
-const Redis = mongoose.model("Redis", redisSchema)
-export default Redis
+const RedisTemp = mongoose.model("RedisTemp", redisSchema)
+export default RedisTemp

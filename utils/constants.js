@@ -4,7 +4,7 @@ import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand } fr
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import { sendEmail } from "../middleware/s3.js"
 import { privateNamespace } from "./socket.js"
-import RedisTemp from "../models/RedisModel.js"
+import RedisTemp from "../models/redis_temp.js"
 
 /* ----------------------------------------------------------
  *  CONSTANTS

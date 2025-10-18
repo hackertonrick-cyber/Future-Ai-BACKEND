@@ -2,7 +2,7 @@ import express from "express"
 import jwt from "jsonwebtoken"
 import { authOrgUser, authPatient } from "../controllers/userController.js"
 import passport from "passport"
-import RedisTemp from "../models/RedisModel.js"
+import RedisTemp from "../models/redis_temp.js"
 
 const router = express.Router()
 
