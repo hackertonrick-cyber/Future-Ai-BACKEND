@@ -9,7 +9,7 @@ import Counter from "../models/counterModel.js"
 import Organization from "../models/organizationModel.js"
 import OrgUser from "../models/orgUserModel.js"
 import AccessRequest from "../models/accessRequestModel.js"
-import Redis from "../models/RedisModel.js"
+import RedisTemp from "../models/RedisModel.js"
 
 const createOrganizationInvite = asyncHandler(async (req, res) => {
   const { companyName, country, address, contactEmail, contactPhone, invitedBy } = req.body
@@ -33,7 +33,7 @@ const createOrganizationInvite = asyncHandler(async (req, res) => {
   }
 
   // Store in RedisModel with TTL (5 minutes default)
-  await Redis.create({
+  await RedisTemp.create({
     key: token,
     value: inviteData,
   })
@@ -79,7 +79,7 @@ const registerOrganization = asyncHandler(async (req, res) => {
   // 🔹 Validate invite token via RedisModel
   let redisRecord = null
   if (inviteToken) {
-    redisRecord = await Redis.findOne({ key: inviteToken })
+    redisRecord = await RedisTemp.findOne({ key: inviteToken })
     if (!redisRecord) {
       return res.status(403).json({ message: "Invalid or expired invite token." })
     }
@@ -1051,11 +1051,11 @@ const passwordResetInit = asyncHandler(async (req, res) => {
     expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 mins expiry
   }
 
-  const existing = await Redis.findOne({ key }).lean()
+  const existing = await RedisTemp.findOne({ key }).lean()
   if (existing) {
-    await Redis.updateOne({ key }, { $set: tempUserData })
+    await RedisTemp.updateOne({ key }, { $set: tempUserData })
   } else {
-    await Redis.create(tempUserData)
+    await RedisTemp.create(tempUserData)
   }
 
   const subject = "Your Password Reset Code"
@@ -1085,7 +1085,7 @@ const passwordReset = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Email, code, and new password are required." })
   }
 
-  const redisRecord = await Redis.findOne({ key: `password-reset:${email}` })
+  const redisRecord = await RedisTemp.findOne({ key: `password-reset:${email}` })
   if (!redisRecord) {
     return res.status(400).json({ message: "Reset code expired or not found." })
   }

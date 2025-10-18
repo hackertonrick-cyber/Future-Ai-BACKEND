@@ -2,7 +2,7 @@ import express from "express"
 import jwt from "jsonwebtoken"
 import { authOrgUser, authPatient } from "../controllers/userController.js"
 import passport from "passport"
-import Redis from "../models/RedisModel.js"
+import RedisTemp from "../models/RedisModel.js"
 
 const router = express.Router()
 
@@ -43,14 +43,14 @@ router.get("/google/callback", async (req, res, next) => {
           expiresAt: new Date(Date.now() + 60000), // Expires in 1 minute
         };
 
-        const existingData = await Redis.findOne({ key: `signup:${newUser.email}` }).lean();
+        const existingData = await RedisTemp.findOne({ key: `signup:${newUser.email}` }).lean();
         console.log("Existing Data Check:", existingData);
 
         if (!existingData) {
-          console.log("No existing data found, saving new user data to Redis");
-          await Redis.create(tempUserData);
+          console.log("No existing data found, saving new user data to RedisTemp");
+          await RedisTemp.create(tempUserData);
         } else {
-          console.log("Existing data found in Redis, skipping saving");
+          console.log("Existing data found in RedisTemp, skipping saving");
         }
 
         const token = jwt.sign({ email: newUser.email }, process.env.JWT_SECRET, { expiresIn: "1m" });
@@ -59,7 +59,7 @@ router.get("/google/callback", async (req, res, next) => {
         // Redirect to the signup page with the token in the query string
         return res.redirect(`${process.env.GOOGLE_AUTH_SUCCESS_URL}/signup?token=${token}`);
       } catch (error) {
-        console.error("Error saving new user data in Redis-like model:", error);
+        console.error("Error saving new user data in RedisTemp-like model:", error);
         return res.redirect(`${process.env.GOOGLE_AUTH_FAIL_URL}`);
       }
     }
@@ -75,15 +75,15 @@ router.get("/google/callback", async (req, res, next) => {
           createdAt: new Date(),
           expiresAt: new Date(Date.now() + 60000), // Expires in 1 minute
         };
-        await Redis.create(tempUserData);
-        console.log("User data saved to Redis");
+        await RedisTemp.create(tempUserData);
+        console.log("User data saved to RedisTemp");
 
         const token = jwt.sign({ email: user.email }, process.env.JWT_SECRET, { expiresIn: "1m" });
         console.log("Generated Token for Existing User:", token);
 
         return res.redirect(`${process.env.GOOGLE_AUTH_SUCCESS_URL}?token=${token}`);
       } catch (error) {
-        console.error("Error saving user data in Redis-like model:", error);
+        console.error("Error saving user data in RedisTemp-like model:", error);
         return res.redirect(`${process.env.GOOGLE_AUTH_FAIL_URL}`);
       }
     }

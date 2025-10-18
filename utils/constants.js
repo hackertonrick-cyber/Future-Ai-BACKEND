@@ -4,7 +4,7 @@ import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand } fr
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import { sendEmail } from "../middleware/s3.js"
 import { privateNamespace } from "./socket.js"
-import Redis from "../models/RedisModel.js"
+import RedisTemp from "../models/RedisModel.js"
 
 /* ----------------------------------------------------------
  *  CONSTANTS
@@ -84,24 +84,24 @@ export const compressImage = async (
 
 export const setTempData = async (key, value, ttlSeconds = 300) => {
   try {
-    await Redis.create({
+    await RedisTemp.create({
       key,
       value,
       createdAt: new Date(),
       expiresAt: new Date(Date.now() + ttlSeconds * 1000),
     })
   } catch (error) {
-    console.error("Redis Temp Store Error:", error)
+    console.error("RedisTemp Temp Store Error:", error)
     throw new Error("Failed to store temporary data")
   }
 }
 
 export const getTempData = async (key) => {
   try {
-    const entry = await Redis.findOneAndDelete({ key })
+    const entry = await RedisTemp.findOneAndDelete({ key })
     return entry?.value || null
   } catch (error) {
-    console.error("Redis Temp Fetch Error:", error)
+    console.error("RedisTemp Temp Fetch Error:", error)
     throw new Error("Failed to retrieve temporary data")
   }
 }
