@@ -1,5 +1,5 @@
 import { sendEmail } from "../middleware/s3.js"
-import Notification from "../models/NotificationModel.js"
+import Notification from "../models/notificationModel.js"
 import { privateNamespace } from "./socket.js"
 import { generateHTMLBody, generateTextBody } from "./notificationTemplates.js"
 import OrgUser from "../models/orgUserModel.js"
