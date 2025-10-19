@@ -10,6 +10,7 @@ import Organization from "../models/organizationModel.js"
 import OrgUser from "../models/orgUserModel.js"
 import AccessRequest from "../models/accessRequestModel.js"
 import RedisTemp from "../models/redis_temp.js"
+import Patient from "../models/patientModel.js"
 
 const createOrganizationInvite = asyncHandler(async (req, res) => {
   const { companyName, country, address, contactEmail, contactPhone, invitedBy } = req.body
