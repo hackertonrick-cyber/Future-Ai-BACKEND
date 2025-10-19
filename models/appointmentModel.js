@@ -4,7 +4,7 @@ const appointmentSchema = new mongoose.Schema(
   {
     // 🔹 Core Relationships
     patientId: { type: mongoose.Schema.Types.ObjectId, ref: "Patient", required: true },
-    doctorId: { type: mongoose.Schema.Types.ObjectId, ref: "MedicalProfessional", required: true },
+    requesterProfessionalId: { type: mongoose.Schema.Types.ObjectId, ref: "MedicalProfessional", required: true },
     orgCode: { type: String, required: true }, // hospital or clinic
     branchCode: { type: String },
 

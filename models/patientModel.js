@@ -26,7 +26,9 @@ const patientSchema = new mongoose.Schema(
     // Emergency & Next of Kin
     nextOfKin: { name: String, relationship: String, phone: String, address: String },
     emergencyContacts: [{ name: String, relationship: String, phone: String, address: String }],
-
+    restrictedAccess: {
+      doctors: [{ type: mongoose.Schema.Types.ObjectId, ref: "OrgUser" }],
+    },
     // Admission Details
     admitted: { type: Boolean, default: false },
     admittedAt: Date,

@@ -24,7 +24,14 @@ const generatePatientAuthData = (patient) => {
     lastLogin: patient.lastLogin || null,
     accountCreated: patient.createdAt,
     accountUpdated: patient.updatedAt,
-    token: generateToken(patient._id),
+    token: generateToken({
+      _id: patient._id,
+      username: patient.username,
+      firstName: patient.firstName,
+      lastName: patient.lastName,
+      email: patient.email,
+      verified: patient.verified
+    }),
   }
 }
 

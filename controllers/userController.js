@@ -10,8 +10,11 @@ import Organization from "../models/organizationModel.js"
 import OrgUser from "../models/orgUserModel.js"
 import AccessRequest from "../models/accessRequestModel.js"
 import RedisTemp from "../models/redis_temp.js"
-import crypto from "crypto"
+import * as crypto from "crypto"
 import Patient from "../models/patientModel.js"
+import MedicalProfessional from "../models/medicalProfessionalModel.js"
+import generateToken from "../utils/generateToken.js"
+import generatePatientAuthData from "../utils/generatePatientAuthData.js"
 
 const createOrganizationInvite = asyncHandler(async (req, res) => {
   const { companyName, country, address, contactEmail, contactPhone } = req.body
@@ -78,7 +81,6 @@ This link will expire in 5 minutes for security reasons.`,
 const registerOrganization = asyncHandler(async (req, res) => {
   const { address, contactEmail, branchName, adminEmail, adminPassword, inviteToken } = req.body
 
-  // 🔹 Validate invite token via RedisModel
   let redisRecord = null
   if (inviteToken) {
     redisRecord = await RedisTemp.findOne({ key: inviteToken })
@@ -89,9 +91,9 @@ const registerOrganization = asyncHandler(async (req, res) => {
 
   const session = await mongoose.startSession()
   session.startTransaction()
+  let committed = false
 
   try {
-    // If invite data exists, use it as authoritative source
     const inviteData = redisRecord?.value || {}
 
     const existingOrg = await Organization.findOne({
@@ -143,14 +145,17 @@ const registerOrganization = asyncHandler(async (req, res) => {
       { session }
     )
 
-    await Organization.findByIdAndUpdate(createdOrg._id, { primaryAdminUser: adminUser[0]._id }, { session })
+    await Organization.findByIdAndUpdate(
+      createdOrg._id,
+      { primaryAdminUser: adminUser[0]._id },
+      { session }
+    )
 
-    // Optional: delete token after use
     if (redisRecord) await redisRecord.deleteOne()
-
     await session.commitTransaction()
+    committed = true // ✅ prevent abort after commit
 
-    res.status(201).json({
+    return res.status(201).json({
       organization: {
         _id: createdOrg._id,
         companyCode,
@@ -160,7 +165,14 @@ const registerOrganization = asyncHandler(async (req, res) => {
       },
     })
   } catch (err) {
-    await session.abortTransaction()
+    if (!committed) {
+      try {
+        await session.abortTransaction()
+      } catch (abortErr) {
+        console.error("Abort transaction failed:", abortErr)
+      }
+    }
+    console.error("RegisterOrganization Error:", err)
     res.status(500).json({ message: err.message })
   } finally {
     session.endSession()
@@ -171,13 +183,11 @@ const registerOrganization = asyncHandler(async (req, res) => {
 // @route POST /user
 // @access Public
 const registerUser = asyncHandler(async (req, res) => {
-  console.log("i am registering once")
-  const { userName, googleId, location, firstName, lastName, gender, dob, email, country, termsCondition, newsLetters, password } = req.body
+  const { username, googleId, location, firstName, lastName, gender, dob, email, country, termsCondition, newsLetters, password } = req.body
 
   if (!googleId && !password) {
     throw new Error("Either Google ID or password is required")
   }
-  console.log(req.body)
   // Ensure coordinates are valid
   if (!location || isNaN(Number(location.lng)) || isNaN(Number(location.lat))) {
     throw new Error("Invalid location coordinates")
@@ -193,8 +203,8 @@ const registerUser = asyncHandler(async (req, res) => {
 
   try {
     const result = await session.withTransaction(async () => {
-      const existingUser = await User.findOne({
-        $or: [{ userName }, { email }],
+      const existingUser = await Patient.findOne({
+        $or: [{ username }, { email }],
       })
         .collation({ locale: "en_US", strength: 2 })
         .session(session)
@@ -202,9 +212,8 @@ const registerUser = asyncHandler(async (req, res) => {
       if (existingUser) {
         throw new Error(ERROR_RESPONSE.USER_ALREADY_EXIST)
       }
-      console.log("exixt user?", existingUser)
       const newUserData = {
-        userName: userName.toLowerCase(),
+        username: username.toLowerCase(),
         firstName: firstName.toLowerCase(),
         lastName: lastName.toLowerCase(),
         gender,
@@ -217,7 +226,7 @@ const registerUser = asyncHandler(async (req, res) => {
         },
         termsCondition,
         newsLetters,
-        password,
+        passwordHash:password,
         avatar: process.env.LEPRECHAUN_IMAGE,
         createdBy: email.toLowerCase(),
       }
@@ -226,7 +235,7 @@ const registerUser = asyncHandler(async (req, res) => {
         newUserData.googleId = googleId.trim()
       }
 
-      const [createdUser] = await User.create([newUserData], { session })
+      const [createdUser] = await Patient.create([newUserData], { session })
 
       await Counter.findOneAndUpdate({ key: "userCount" }, { $inc: { count: 1 } }, { upsert: true, new: true, session })
 
@@ -256,7 +265,7 @@ const registerUser = asyncHandler(async (req, res) => {
     res.status(201).json({
       user: {
         _id: createdUser._id,
-        userName: createdUser.userName,
+        username: createdUser.username,
         firstName: createdUser.firstName,
         lastName: createdUser.lastName,
         gender: createdUser.gender,
@@ -286,12 +295,12 @@ const registerUser = asyncHandler(async (req, res) => {
 //#endregion
 
 const registerOrgUser = asyncHandler(async (req, res) => {
-  const { username, password, role, branchCode } = req.body
+  const { username, password, role, branchCode, firstName, lastName, gender, email, phone, profession, specialization } = req.body
   const admin = req.user
 
   // 🧩 Validate Inputs
-  if (!username || !password || !role) {
-    return res.status(400).json({ message: "Username, password, and role are required." })
+  if (!username || !password || !role || !firstName || !lastName) {
+    return res.status(400).json({ message: "Required fields: username, password, role, firstName, lastName." })
   }
 
   // 🛡️ Role Check
@@ -303,7 +312,7 @@ const registerOrgUser = asyncHandler(async (req, res) => {
   session.startTransaction()
 
   try {
-    // Check duplicate user in same company
+    // 🔍 Check for duplicate username in same org
     const existingUser = await OrgUser.findOne({
       username: username.toLowerCase(),
       companyCode: admin.companyCode,
@@ -313,13 +322,13 @@ const registerOrgUser = asyncHandler(async (req, res) => {
       throw new Error("Username already exists in your organization.")
     }
 
-    // Ensure admin is not trying to create a super-admin
+    // 🔒 Role constraint: only super-admins can create another super-admin
     if (role === "super-admin" && admin.role !== "super-admin") {
       throw new Error("Only super-admins can create another super-admin.")
     }
 
-    // Create new org user
-    const newUser = await OrgUser.create(
+    // 🧱 Create OrgUser
+    const [newUser] = await OrgUser.create(
       [
         {
           companyCode: admin.companyCode,
@@ -334,16 +343,40 @@ const registerOrgUser = asyncHandler(async (req, res) => {
       { session }
     )
 
+    // 🧩 Create corresponding MedicalProfessional (if role is clinical)
+    const clinicalRoles = ["doctor", "nurse", "technician", "therapist", "pharmacist"]
+    if (clinicalRoles.includes(role)) {
+      await MedicalProfessional.create(
+        [
+          {
+            firstName,
+            lastName,
+            gender: gender || "other",
+            profession: role, // aligns with OrgUser role
+            specialization,
+            companyCode: admin.companyCode,
+            branchCode: branchCode || admin.branchCode,
+            orgUserId: newUser._id,
+            email,
+            phone,
+            active: true,
+            verified: false,
+          },
+        ],
+        { session }
+      )
+    }
+
     await session.commitTransaction()
 
     res.status(201).json({
-      message: "Organization user created successfully.",
+      message: "Organization user registered successfully.",
       user: {
-        _id: newUser[0]._id,
-        username: newUser[0].username,
-        role: newUser[0].role,
-        companyCode: newUser[0].companyCode,
-        branchCode: newUser[0].branchCode,
+        _id: newUser._id,
+        username: newUser.username,
+        role: newUser.role,
+        companyCode: newUser.companyCode,
+        branchCode: newUser.branchCode,
         createdBy: admin.username,
       },
     })
@@ -408,9 +441,7 @@ const registerSuperAdmin = asyncHandler(async (req, res) => {
   } catch (error) {
     // only abort if not committed yet
     if (!committed) {
-      await session.abortTransaction().catch((abortErr) =>
-        console.error("Abort transaction failed:", abortErr)
-      )
+      await session.abortTransaction().catch((abortErr) => console.error("Abort transaction failed:", abortErr))
     }
     console.error("SuperAdmin Registration Error:", error)
     return res.status(500).json({ message: error.message })
@@ -418,7 +449,6 @@ const registerSuperAdmin = asyncHandler(async (req, res) => {
     session.endSession()
   }
 })
-
 
 //#region @desc Auth user & get token
 // @route POST /org/login
@@ -468,8 +498,8 @@ const authOrgUser = asyncHandler(async (req, res) => {
     if (!user.loginHistory) user.loginHistory = []
     user.lastLogin = new Date()
     user.loginHistory.push({
-      ip: req.ip|| "192.168.40.40",
-      device: req.headers["user-agent"]|| "doctor-device",
+      ip: req.ip || "192.168.40.40",
+      device: req.headers["user-agent"] || "doctor-device",
       timestamp: new Date(),
     })
     await user.save()
@@ -572,7 +602,7 @@ const authPatient = asyncHandler(async (req, res) => {
     }
 
     // 🔑 Validate password
-    const isMatch = await bcrypt.compare(password, patient.passwordHash)
+     const isMatch = await patient.matchPassword(password)
     if (!isMatch) {
       return res.status(401).json({
         error: ERROR_RESPONSE.FAILED_AUTH,
@@ -583,8 +613,8 @@ const authPatient = asyncHandler(async (req, res) => {
     // 🕒 Update login activity
     patient.lastLogin = new Date()
     patient.loginHistory.push({
-      ip: req.ip|| "192.168.10.10",
-      device: req.headers["user-agent"]|| "test device",
+      ip: req.ip || "192.168.10.10",
+      device: req.headers["user-agent"] || "test device",
       timestamp: new Date(),
     })
     await patient.save()
@@ -634,6 +664,64 @@ const getOrgUserProfile = asyncHandler(async (req, res) => {
   }
 })
 
+const getOrganizationsList = asyncHandler(async (req, res) => {
+  const requester = req.user
+  const { country, search, includeBranches } = req.query
+
+  // 🔹 Base query — only active, verified organizations
+  const query = { isActive: true, verified: true }
+
+  // Optional country filter
+  if (country) query.country = country
+
+  // Optional text search (companyName or companyCode)
+  if (search) {
+    query.$or = [
+      { companyName: { $regex: search, $options: "i" } },
+      { companyCode: { $regex: search, $options: "i" } },
+    ]
+  }
+
+  // 🔹 Role-based visibility
+  if (requester?.role === "patient") {
+    // Patients should only see approved/verified organizations
+    query.registrationStatus = "approved"
+  } else if (["doctor", "nurse", "admin", "technician"].includes(requester?.role)) {
+    // Medical staff can also see pending ones (for potential collaboration)
+    query.registrationStatus = { $in: ["approved", "pending"] }
+  } else if (requester?.role === "super-admin") {
+    // Full visibility for super admins
+    delete query.verified
+    delete query.isActive
+  }
+
+  // 🔹 Projection (lightweight for patients)
+  const projection =
+    requester?.role === "patient"
+      ? {
+          companyCode: 1,
+          companyName: 1,
+          country: 1,
+          address: 1,
+          contactEmail: 1,
+          contactPhone: 1,
+          website: 1,
+          branches: includeBranches ? 1 : 0,
+        }
+      : {}
+
+  const organizations = await Organization.find(query, projection).sort({ companyName: 1 })
+
+  if (!organizations.length) {
+    return res.status(404).json({ message: "No organizations found." })
+  }
+
+  res.json({
+    count: organizations.length,
+    organizations,
+  })
+})
+
 const getPatientProfile = asyncHandler(async (req, res) => {
   try {
     const patientId = req.params.id || req.user._id
@@ -657,11 +745,9 @@ const getPatientProfile = asyncHandler(async (req, res) => {
     // 🔒 Access Control Logic
     const isSelf = requester._id.toString() === patient._id.toString()
     const isDoctorAuthorized =
-      patient.restrictedAccess?.doctors?.some(
-        (doc) => doc._id.toString() === requester._id.toString()
-      ) || requester.role === "admin"
+      patient.restrictedAccess?.doctors?.some((doc) => doc._id.toString() === requester._id.toString()) || requester.role === "admin"
 
-    const isMedicalStaff = ["doctor", "nurse", "admin"].includes(requester.role)
+    const isMedicalStaff = ["doctor", "nurse", "admin", "technician"].includes(requester.role)
 
     if (!isSelf && !isDoctorAuthorized && !isMedicalStaff) {
       return res.status(403).json({
@@ -690,47 +776,73 @@ const getPatientProfile = asyncHandler(async (req, res) => {
 })
 
 const requestAccessFromOrganization = asyncHandler(async (req, res) => {
-  const { targetOrgCode, reasonForAccess, priority } = req.body
+  const { targetOrgCode, patientId, reasonForAccess, requestedCategories, priority } = req.body
 
-  // Validate fields
-  if (!targetOrgCode || !reasonForAccess) {
-    return res.status(400).json({ message: "Organization code and reason for access are required." })
+  // 🔍 Validate required inputs
+  if (!targetOrgCode || !reasonForAccess || !patientId) {
+    return res.status(400).json({
+      message: "Organization code, patient ID, and reason for access are required.",
+    })
   }
 
   const requester = req.user
-  if (!["doctor", "nurse", "admin"].includes(requester.role)) {
+
+  // 🔒 Restrict to authorized roles
+  if (!["doctor", "nurse", "admin", "technician"].includes(requester.role)) {
     return res.status(403).json({ message: "Only medical professionals can request access." })
   }
 
-  // Validate organization exists
+  // 🔹 Verify target organization
   const organization = await Organization.findOne({ companyCode: targetOrgCode, isActive: true })
   if (!organization) {
-    return res.status(404).json({ message: "Organization not found or inactive." })
+    return res.status(404).json({ message: "Target organization not found or inactive." })
   }
 
-  // Prevent duplicate open requests
+  // 🔹 Verify patient exists
+  const patient = await Patient.findById(patientId)
+  if (!patient) {
+    return res.status(404).json({ message: "Patient record not found." })
+  }
+
+  // 🔹 Get the requester’s professional profile
+  const professional = await MedicalProfessional.findOne({ orgUserId: requester._id })
+  if (!professional) {
+    return res.status(400).json({
+      message: "Requester does not have a medical professional profile.",
+    })
+  }
+
+  // 🔹 Prevent duplicate open requests for the same patient + organization
   const existingRequest = await AccessRequest.findOne({
-    doctorId: requester._id,
-    orgCode: targetOrgCode,
-    status: { $in: ["scheduled", "confirmed", "in_progress"] },
+    patientId,
+    requesterProfessionalId: professional._id,
+    targetOrgCode,
+    status: { $in: ["pending", "approved"] },
   })
+
   if (existingRequest) {
-    return res.status(409).json({ message: "Access already requested or pending with this organization." })
+    return res.status(409).json({
+      message: `An active access request for this patient already exists with ${targetOrgCode}.`,
+    })
   }
 
-  // Create the request
+  // 🔹 Create new patient-specific access request
   const newRequest = await AccessRequest.create({
-    doctorId: requester._id,
-    orgCode: targetOrgCode,
-    branchCode: null,
-    reasonForVisit: reasonForAccess,
-    visitType: "consultation",
+    patientId,
+    requesterProfessionalId: professional._id,
+    requesterOrgCode: requester.companyCode,
+    requesterBranchCode: requester.branchCode,
+    targetOrgCode, // ✅ explicitly record target organization
+    requestedCategories: requestedCategories?.length
+      ? requestedCategories
+      : [{ category: "notes", reason: reasonForAccess }],
+    justification: reasonForAccess,
+    status: "pending",
     priority: priority || "normal",
-    status: "scheduled",
-    createdBy: requester._id,
+    requestedAt: new Date(),
   })
 
-  // Notify the organization’s admin(s)
+  // 🔔 Notify target organization admins
   const orgAdmins = await Organization.aggregate([
     { $match: { companyCode: targetOrgCode } },
     {
@@ -750,8 +862,8 @@ const requestAccessFromOrganization = asyncHandler(async (req, res) => {
     await sendNotification({
       userId: admin.admins._id,
       type: "access_request_org",
-      subject: "New Access Request",
-      message: `${requester.username} from ${requester.companyCode} has requested permission to access patient data at ${organization.companyName}.`,
+      subject: "New Patient Data Access Request",
+      message: `${requester.username} from ${requester.companyCode} has requested access to patient data (${patient.firstName} ${patient.lastName}) at ${organization.companyName}.`,
       from: {
         _id: requester._id,
         userName: requester.username,
@@ -767,13 +879,19 @@ const requestAccessFromOrganization = asyncHandler(async (req, res) => {
     })
   }
 
+  // ✅ Respond cleanly
   res.status(201).json({
-    message: `Access request sent to ${organization.companyName}.`,
+    message: `Access request for patient ${patient.firstName} ${patient.lastName} sent to ${organization.companyName}.`,
     request: {
       _id: newRequest._id,
-      orgCode: newRequest.orgCode,
-      reasonForVisit: newRequest.reasonForVisit,
+      patientId: newRequest.patientId,
+      requesterProfessionalId: newRequest.requesterProfessionalId,
+      requesterOrgCode: newRequest.requesterOrgCode,
+      targetOrgCode: newRequest.targetOrgCode, // ✅ now visible in response
+      requestedCategories: newRequest.requestedCategories,
+      justification: newRequest.justification,
       status: newRequest.status,
+      priority: newRequest.priority,
     },
   })
 })
@@ -790,14 +908,14 @@ const listAccessRequests = asyncHandler(async (req, res) => {
     const { status } = req.query // optional filter
 
     const query = {
-      orgCode: requester.companyCode,
+      targetOrgCode: requester.companyCode,
     }
 
     if (status) query.status = status // e.g., ?status=scheduled or confirmed
 
     const requests = await AccessRequest.find(query)
       .populate([
-        { path: "doctorId", select: "username role companyCode branchCode" },
+        { path: "requesterProfessionalId", select: "username role companyCode branchCode" },
         { path: "patientId", select: "firstName lastName email" },
       ])
       .sort({ createdAt: -1 })
@@ -831,7 +949,7 @@ const approveAccessRequest = asyncHandler(async (req, res) => {
 
   try {
     const accessRequest = await AccessRequest.findById(id)
-      .populate("doctorId", "username companyCode branchCode")
+      .populate("requesterProfessionalId", "username companyCode branchCode")
       .populate("patientId", "firstName lastName restrictedAccess")
       .lean()
 
@@ -854,11 +972,11 @@ const approveAccessRequest = asyncHandler(async (req, res) => {
     // If approved, grant access
     if (decision === "approved" && accessRequest.patientId) {
       await Patient.findByIdAndUpdate(accessRequest.patientId._id, {
-        $addToSet: { "restrictedAccess.doctors": accessRequest.doctorId._id },
+        $addToSet: { "restrictedAccess.doctors": accessRequest.requesterProfessionalId._id },
       })
 
       await sendNotification({
-        userId: accessRequest.doctorId._id,
+        userId: accessRequest.requesterProfessionalId._id,
         type: "access_approved",
         subject: "Access Approved",
         message: `Your access request for patient ${accessRequest.patientId.firstName} ${accessRequest.patientId.lastName} has been approved by ${admin.username}.`,
@@ -873,7 +991,7 @@ const approveAccessRequest = asyncHandler(async (req, res) => {
     // If rejected, notify doctor
     if (decision === "rejected") {
       await sendNotification({
-        userId: accessRequest.doctorId._id,
+        userId: accessRequest.requesterProfessionalId._id,
         type: "access_denied",
         subject: "Access Request Denied",
         message: `Your request for access was denied by ${admin.username}.`,
@@ -904,7 +1022,7 @@ const disapproveAccessRequest = asyncHandler(async (req, res) => {
 
   try {
     const accessRequest = await AccessRequest.findById(id)
-      .populate("doctorId", "username companyCode branchCode")
+      .populate("requesterProfessionalId", "username companyCode branchCode")
       .populate("patientId", "firstName lastName restrictedAccess")
       .lean()
 
@@ -919,19 +1037,15 @@ const disapproveAccessRequest = asyncHandler(async (req, res) => {
 
     // ✅ Revoke doctor’s access
     await Patient.findByIdAndUpdate(accessRequest.patientId._id, {
-      $pull: { "restrictedAccess.doctors": accessRequest.doctorId._id },
+      $pull: { "restrictedAccess.doctors": accessRequest.requesterProfessionalId._id },
     })
 
     // ✅ Mark AccessRequest as revoked
-    const updated = await AccessRequest.findByIdAndUpdate(
-      id,
-      { status: "revoked", updatedBy: admin._id, updatedAt: new Date() },
-      { new: true }
-    )
+    const updated = await AccessRequest.findByIdAndUpdate(id, { status: "revoked", updatedBy: admin._id, updatedAt: new Date() }, { new: true })
 
     // ✅ Notify doctor
     await sendNotification({
-      userId: accessRequest.doctorId._id,
+      userId: accessRequest.requesterProfessionalId._id,
       type: "access_revoked",
       subject: "Access Revoked",
       message: `Your access to patient ${accessRequest.patientId.firstName} ${accessRequest.patientId.lastName} has been revoked by ${admin.username}.`,
@@ -943,7 +1057,7 @@ const disapproveAccessRequest = asyncHandler(async (req, res) => {
     })
 
     res.status(200).json({
-      message: `Access revoked successfully for doctor ${accessRequest.doctorId.username}.`,
+      message: `Access revoked successfully for doctor ${accessRequest.requesterProfessionalId.username}.`,
       updated,
     })
   } catch (error) {
@@ -995,7 +1109,6 @@ const getUserNotifications = asyncHandler(async (req, res) => {
 // @route PUT /notification/viewed
 // @access Private
 const updateNotificationViewState = asyncHandler(async (req, res) => {
-  console.log(req.body)
   const { notification_ids } = req.body
 
   if (!Array.isArray(notification_ids) || notification_ids.length === 0) {
@@ -1105,7 +1218,7 @@ const passwordResetInit = asyncHandler(async (req, res) => {
     throw new Error("Email is required.")
   }
 
-  const user = await User.findOne({ email }).lean()
+  const user = await Patient.findOne({ email }).lean()
   if (!user) {
     res.status(404)
     throw new Error("No user found with that email.")
@@ -1164,7 +1277,7 @@ const passwordReset = asyncHandler(async (req, res) => {
     return res.status(401).json({ message: "Invalid reset code." })
   }
 
-  const user = await User.findOne({ email })
+  const user = await Patient.findOne({ email })
   if (!user) {
     return res.status(404).json({ message: "User not found." })
   }
@@ -1220,6 +1333,7 @@ export {
   registerOrganization,
   registerUser,
   registerSuperAdmin,
+  getOrganizationsList,
   registerOrgUser,
   getUserNotifications,
   updateActionTaken,

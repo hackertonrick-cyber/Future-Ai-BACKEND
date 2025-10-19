@@ -10,7 +10,7 @@ const orgUserSchema = new mongoose.Schema(
     // 🔹 User credentials & role
     username: { type: String, required: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true },
-    role: { type: String, enum: ["admin", "doctor", "nurse", "super-admin"], required: true },
+    role: { type: String, enum: ["admin", "doctor", "nurse", "super-admin", "technician"], required: true },
 
     // 🔹 Audit & control
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "OrgUser" },
