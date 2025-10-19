@@ -23,7 +23,7 @@ import { protect, protectOrg, protectAdmin } from "../middleware/authMiddleware.
 router.route("/user").post(registerUser)
 router.route("/patient-profile").post(protect, getPatientProfile)
 
-router.route("/admin/user").post(protectAdmin, registerSuperAdmin)
+router.route("/admin/user").post( registerSuperAdmin)
 router.route("/org").post(registerOrganization)
 router.route("/notifications").get(protect, getUserNotifications)
 
