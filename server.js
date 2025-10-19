@@ -62,7 +62,7 @@ if (process.env.NODE_ENV === "production") {
 
 // ---- API routes ----
 app.use("/api/auth", authRoutes)
-app.use("/api/org-user", orgUserRoutes)
+app.use("/api/user", orgUserRoutes)
 
 // Uploads
 app.use("/uploads", express.static(path.join(__dirname, "/uploads")))
