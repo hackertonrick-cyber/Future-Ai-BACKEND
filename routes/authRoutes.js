@@ -1,6 +1,6 @@
 import express from "express"
 import jwt from "jsonwebtoken"
-import { authOrgUser, authPatient } from "../controllers/userController.js"
+import { authOrgUser, authPatient, authSuperAdmin } from "../controllers/userController.js"
 import passport from "passport"
 import RedisTemp from "../models/redis_temp.js"
 
@@ -8,6 +8,7 @@ const router = express.Router()
 
 router.post("/org/login", authOrgUser)
 router.post("/login", authPatient)
+router.post("/admin/login", authSuperAdmin)
 
 // @desc    Google auth callback
 // @route   GET /auth/google/callback

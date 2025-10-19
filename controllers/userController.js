@@ -1,5 +1,5 @@
 import asyncHandler from "express-async-handler"
-import generateToken from "../utils/generateToken.js"
+import generateOrgAuthData from "../utils/generateOrgAuthData.js"
 import { ERROR_RESPONSE, generateSignedUrl } from "../utils/constants.js"
 import { differenceInCalendarYears, parse } from "date-fns"
 import mongoose from "mongoose"
@@ -10,10 +10,11 @@ import Organization from "../models/organizationModel.js"
 import OrgUser from "../models/orgUserModel.js"
 import AccessRequest from "../models/accessRequestModel.js"
 import RedisTemp from "../models/redis_temp.js"
+import crypto from "crypto"
 import Patient from "../models/patientModel.js"
 
 const createOrganizationInvite = asyncHandler(async (req, res) => {
-  const { companyName, country, address, contactEmail, contactPhone, invitedBy } = req.body
+  const { companyName, country, address, contactEmail, contactPhone } = req.body
 
   // Basic validation
   if (!companyName || !contactEmail || !country) {
@@ -30,7 +31,7 @@ const createOrganizationInvite = asyncHandler(async (req, res) => {
     address,
     contactEmail,
     contactPhone,
-    invitedBy,
+    invitedBy: req.user._id,
   }
 
   // Store in RedisModel with TTL (5 minutes default)
@@ -490,6 +491,65 @@ const authOrgUser = asyncHandler(async (req, res) => {
   }
 })
 //#endregion
+
+const authSuperAdmin = asyncHandler(async (req, res) => {
+  const { username, password } = req.body
+
+  try {
+    if (!username || !password) {
+      return res.status(400).json({
+        error: ERROR_RESPONSE.INVALID_REQUEST,
+        message: "Username and password are required.",
+      })
+    }
+
+    // 🔹 Step 1: Find user with role = super-admin
+    const user = await OrgUser.findOne({
+      username: username.toLowerCase(),
+      role: "super-admin",
+    }).collation({ locale: "en_US", strength: 2 })
+
+    if (!user) {
+      return res.status(401).json({
+        error: ERROR_RESPONSE.FAILED_AUTH,
+        message: "Invalid username or password.",
+      })
+    }
+
+    // 🔹 Step 2: Validate password
+    const isMatch = await user.matchPassword(password)
+    if (!isMatch) {
+      return res.status(401).json({
+        error: ERROR_RESPONSE.FAILED_AUTH,
+        message: "Invalid username or password.",
+      })
+    }
+
+    // 🔹 Step 3: Optional — log activity
+    if (!user.loginHistory) user.loginHistory = []
+    user.lastLogin = new Date()
+    user.loginHistory.push({
+      ip: req.ip || "0.0.0.0",
+      device: req.headers["user-agent"] || "super-admin-console",
+      timestamp: new Date(),
+    })
+    await user.save()
+
+    // 🔹 Step 4: Generate token and response
+    const authData = generateOrgAuthData(user)
+
+    res.status(200).json({
+      message: "Super-admin login successful",
+      user: authData,
+    })
+  } catch (error) {
+    console.error("SuperAdmin Auth Error:", error)
+    res.status(500).json({
+      error: ERROR_RESPONSE.FAILED,
+      message: "Internal authentication error",
+    })
+  }
+})
 
 const authPatient = asyncHandler(async (req, res) => {
   const { username, password } = req.body
@@ -1149,6 +1209,7 @@ If this wasn't you, please secure your account immediately by contacting support
 export {
   authOrgUser,
   authPatient,
+  authSuperAdmin,
   getOrgUserProfile,
   getPatientProfile,
   requestAccessFromOrganization,

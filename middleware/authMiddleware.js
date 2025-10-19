@@ -54,12 +54,10 @@ const protectOrg = asyncHandler(async (req, res, next) => {
 
 const protectAdmin = asyncHandler(async (req, res, next) => {
   let token
-
   if (req.headers.authorization && req.headers.authorization.startsWith("Bearer")) {
     try {
       token = req.headers.authorization.split(" ")[1]
       const decoded = jwt.verify(token, process.env.JWT_SECRET)
-
       const orgUser = await OrgUser.findById(decoded.id).select("-passwordHash")
 
       if (!orgUser || orgUser.role !== "super-admin") {
