@@ -1,19 +1,17 @@
 import asyncHandler from "express-async-handler"
 import Appointment from "../models/appointmentModel.js"
+import { sendNotification } from "../utils/notificationService.js" // ✅ make sure this path is correct
 
-// 🟢 Create Appointment
-// 🟢 Create Appointment (OrgUser booking for a patient)
-// 🟢 Create Appointment (OrgUser booking for a patient)
 const createAppointment = asyncHandler(async (req, res) => {
   const { patientId, appointmentDate, reasonForVisit, visitType, priority } = req.body
 
   // 🔹 Extract OrgUser context from token/session
-  const { companyCode, branchCode, _id } = req.user || {}
+  const { companyCode, branchCode, _id, firstName, lastName, role } = req.user || {}
 
-  // Basic validation
+  // 🔸 Validate required fields
   if (!patientId || !appointmentDate) {
     return res.status(400).json({
-      message: "Missing required fields: patientId, requesterProfessionalId, appointmentDate",
+      message: "Missing required fields: patientId, appointmentDate",
     })
   }
 
@@ -21,7 +19,7 @@ const createAppointment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid organization context (companyCode missing)" })
   }
 
-  // 🔹 Create appointment with org context automatically filled
+  // 🔹 Create appointment record
   const appointment = await Appointment.create({
     patientId,
     requesterProfessionalId: _id,
@@ -34,11 +32,44 @@ const createAppointment = asyncHandler(async (req, res) => {
     createdBy: _id,
   })
 
+  // ✅ Send notification to patient & admin
+  try {
+    await sendNotification({
+      userId: patientId,
+      title: "Appointment Confirmed",
+      message: `Your appointment with Dr. ${firstName || "Unknown"} ${lastName || ""} is scheduled for ${new Date(
+        appointmentDate
+      ).toLocaleString()}.`,
+      type: "appointment",
+      metadata: {
+        appointmentId: appointment._id,
+        orgCode: companyCode,
+        branchCode,
+        priority,
+        visitType,
+        reasonForVisit,
+      },
+    })
+
+    // Optional: Notify admins/staff
+    await sendNotification({
+      role: "admin",
+      orgCode: companyCode,
+      branchCode,
+      title: "New Appointment Booked",
+      message: `${firstName || "A staff member"} booked an appointment for patient ${patientId}.`,
+      type: "system",
+    })
+  } catch (notifyErr) {
+    console.error("Notification dispatch failed:", notifyErr)
+  }
+
   res.status(201).json({
     message: "Appointment booked successfully",
     appointment,
   })
 })
+
 
 // 🟢 Get All Appointments (with filters)
 const getAppointments = asyncHandler(async (req, res) => {

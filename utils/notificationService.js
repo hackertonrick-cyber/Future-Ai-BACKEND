@@ -5,6 +5,7 @@ import { generateHTMLBody, generateTextBody } from "./notificationTemplates.js"
 import OrgUser from "../models/orgUserModel.js"
 
 const NOTIFICATION_RULES = {
+  appointment: { internal: true, email: true, socket: true },
   access_request_org: { internal: true, email: true, socket: true },
   access_approved: { internal: true, email: true, socket: true },
   access_denied: { internal: true, email: true, socket: true },
