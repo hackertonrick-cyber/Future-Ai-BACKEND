@@ -1,14 +1,8 @@
 import { Types } from "mongoose"
 import sharp from "sharp"
-import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectsCommand } from "@aws-sdk/client-s3"
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import { sendEmail } from "../middleware/s3.js"
 import { privateNamespace } from "./socket.js"
 import RedisTemp from "../models/redis_temp.js"
-
-/* ----------------------------------------------------------
- *  CONSTANTS
- * ---------------------------------------------------------- */
 
 export const ERROR_RESPONSE = {
   USER_NOT_FOUND: "User not found.",
@@ -27,11 +21,6 @@ export const SUCCESS_RESPONSE = {
   CREATED: "Record created successfully.",
 }
 
-/* ----------------------------------------------------------
- *  HELPER FUNCTIONS
- * ---------------------------------------------------------- */
-
-/** Format large numbers (e.g., 1.2k, 2.3m) */
 export const formatCount = (count) => {
   if (count < 1000) return count.toString()
   if (count < 1_000_000) return (count / 1000).toFixed(count % 1000 === 0 ? 0 : 1) + "k"
