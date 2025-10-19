@@ -1,6 +1,6 @@
 import asyncHandler from "express-async-handler"
 import generateOrgAuthData from "../utils/generateOrgAuthData.js"
-import { ERROR_RESPONSE, generateSignedUrl } from "../utils/constants.js"
+import { ERROR_RESPONSE } from "../utils/constants.js"
 import { differenceInCalendarYears, parse } from "date-fns"
 import mongoose from "mongoose"
 import { sendEmail } from "../middleware/s3.js"

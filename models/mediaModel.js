@@ -1,5 +1,4 @@
 import mongoose from "mongoose"
-import { generateSignedUrl } from "../utils/constants.js"
 
 const mediaSchema = mongoose.Schema(
   {
@@ -39,30 +38,6 @@ const mediaSchema = mongoose.Schema(
     timestamps: true,
   }
 )
-
-mediaSchema.statics.getProcessedMedia = async function (mediaIds = []) {
-  const mediaDocs = await this.find({ _id: { $in: mediaIds } })
-
-  return Promise.all(
-    mediaDocs.map(async (media) => {
-      let signedUrl = null
-
-      try {
-        signedUrl = await generateSignedUrl(media.media, process.env.WASABI_CHAT_MEDIA_BUCKET, "download")
-      } catch (err) {
-        console.error(`Failed to generate signed URL for media ${media._id}:`, err)
-      }
-
-      const mediaObject = media.toObject({ virtuals: true })
-
-      return {
-        ...mediaObject,
-        signedUrl,
-      }
-    })
-  )
-}
-
 
 // Enable virtuals in JSON output
 mediaSchema.set("toObject", { virtuals: true })

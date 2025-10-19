@@ -78,10 +78,6 @@ export const compressImage = async (
   return transformer.toBuffer()
 }
 
-/* ----------------------------------------------------------
- *  REDIS TEMPORARY STORAGE (OTP, signup invites, etc.)
- * ---------------------------------------------------------- */
-
 export const setTempData = async (key, value, ttlSeconds = 300) => {
   try {
     await RedisTemp.create({
@@ -106,75 +102,6 @@ export const getTempData = async (key) => {
   }
 }
 
-/* ----------------------------------------------------------
- *  WASABI S3 UTILITIES
- * ---------------------------------------------------------- */
-
-const createWasabiClient = () =>
-  new S3Client({
-    region: process.env.WASABI_REGION,
-    endpoint: process.env.WASABI_ENDPOINT,
-    credentials: {
-      accessKeyId: process.env.WASABI_ACCESS_KEY,
-      secretAccessKey: process.env.WASABI_SECRET_KEY,
-    },
-    forcePathStyle: true,
-  })
-
-/**
- * Generate signed URL for upload/download
- */
-export const generateSignedUrl = async (
-  fileName,
-  bucketName,
-  action = "download",
-  contentType = "application/octet-stream"
-) => {
-  const s3 = createWasabiClient()
-  let key = fileName
-
-  if (fileName.startsWith("http") && action === "download") {
-    const url = new URL(fileName)
-    key = decodeURIComponent(url.pathname.slice(1))
-  }
-
-  const command =
-    action === "upload"
-      ? new PutObjectCommand({ Bucket: bucketName, Key: key, ContentType: contentType, ACL: "public-read" })
-      : new GetObjectCommand({ Bucket: bucketName, Key: key })
-
-  return getSignedUrl(s3, command, { expiresIn: 60 * 10 }) // 10 minutes
-}
-
-/**
- * Delete multiple media objects from Wasabi
- */
-export const deleteFromWasabi = async (urls = []) => {
-  if (!urls.length) return
-  const s3 = createWasabiClient()
-  const bucket = process.env.WASABI_CHAT_MEDIA_BUCKET
-
-  const keys = urls
-    .map((u) => {
-      const parts = u.split(".com/")
-      return parts[1]
-    })
-    .filter(Boolean)
-
-  if (!keys.length) return
-
-  try {
-    await s3.send(
-      new DeleteObjectsCommand({
-        Bucket: bucket,
-        Delete: { Objects: keys.map((Key) => ({ Key })) },
-      })
-    )
-  } catch (err) {
-    console.error("Wasabi Delete Error:", err)
-    throw new Error("Failed to delete media from Wasabi")
-  }
-}
 
 /* ----------------------------------------------------------
  *  MIME TYPES
