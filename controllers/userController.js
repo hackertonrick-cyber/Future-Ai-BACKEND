@@ -635,9 +635,12 @@ const authPatient = asyncHandler(async (req, res) => {
 
 const getOrgUserProfile = asyncHandler(async (req, res) => {
   try {
-    const id = req.body.id ? req.body.id : req.user._id
+    const id = req.body.id || req.user._id
 
-    const user = await OrgUser.findById(id).select("-passwordHash -__v").lean()
+    // 🔹 Fetch base org user
+    const user = await OrgUser.findById(id)
+      .select("-passwordHash -__v")
+      .lean()
 
     if (!user) {
       return res.status(404).json({
@@ -646,18 +649,29 @@ const getOrgUserProfile = asyncHandler(async (req, res) => {
       })
     }
 
-    // Optional: attach company/branch details for UI context
-    res.status(200).json({
+    // 🔹 Fetch linked professional profile (if it exists)
+    const professional = await MedicalProfessional.findOne({
+      orgUserId: user._id,
+    })
+      .select("-__v -createdAt -updatedAt")
+      .lean()
+
+    // ✅ Merge both sets of data
+    const profile = {
       ...user,
       isAdmin: user.role === "admin",
       companyCode: user.companyCode,
       branchCode: user.branchCode,
       role: user.role,
-    })
+      professionalProfile: professional || null,
+    }
+
+    return res.status(200).json(profile)
   } catch (error) {
+    console.error("Error fetching org user profile:", error)
     res.status(500).json({
       error: ERROR_RESPONSE.FAILED,
-      message: `Failed to retrieve org user profile: ${error}`,
+      message: `Failed to retrieve org user profile: ${error.message}`,
     })
   }
 })
