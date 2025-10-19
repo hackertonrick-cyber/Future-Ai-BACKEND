@@ -364,6 +364,7 @@ const registerSuperAdmin = asyncHandler(async (req, res) => {
 
   const session = await mongoose.startSession()
   session.startTransaction()
+  let committed = false
 
   try {
     // Ensure no duplicate super-admin exists
@@ -372,7 +373,7 @@ const registerSuperAdmin = asyncHandler(async (req, res) => {
       throw new Error("A super-admin with this username already exists.")
     }
 
-    // Create super-admin (no companyCode or branch restrictions)
+    // Create super-admin
     const superAdmin = await OrgUser.create(
       [
         {
@@ -388,10 +389,11 @@ const registerSuperAdmin = asyncHandler(async (req, res) => {
     )
 
     await session.commitTransaction()
+    committed = true // ✅ mark as committed
 
     const token = generateToken(superAdmin[0]._id)
 
-    res.status(201).json({
+    return res.status(201).json({
       message: "Super-admin registered successfully.",
       user: {
         _id: superAdmin[0]._id,
@@ -403,13 +405,19 @@ const registerSuperAdmin = asyncHandler(async (req, res) => {
       },
     })
   } catch (error) {
-    await session.abortTransaction()
+    // only abort if not committed yet
+    if (!committed) {
+      await session.abortTransaction().catch((abortErr) =>
+        console.error("Abort transaction failed:", abortErr)
+      )
+    }
     console.error("SuperAdmin Registration Error:", error)
-    res.status(500).json({ message: error.message })
+    return res.status(500).json({ message: error.message })
   } finally {
     session.endSession()
   }
 })
+
 
 //#region @desc Auth user & get token
 // @route POST /org/login
