@@ -42,40 +42,32 @@ const createAppointment = asyncHandler(async (req, res) => {
 
 // 🟢 Get All Appointments (with filters)
 const getAppointments = asyncHandler(async (req, res) => {
-  const { status, date } = req.query
+  const { status, date, page = 1, limit = 10 } = req.query
   const { role, companyCode, branchCode, _id } = req.user || {}
 
-  // Base query: always scoped to org
   const query = { orgCode: companyCode }
 
-  // Role-based access control
+  // 🔹 Role-based filtering
   switch (role) {
     case "doctor":
-      // Doctors only see their own appointments
-      query.requesterProfessionalId = orgUserId
+      query.requesterProfessionalId = _id
       break
-
     case "nurse":
-      // Nurses see appointments in their branch only
       query.branchCode = branchCode
       break
-
     case "admin":
-      // Admins see the whole organization (all branches)
+      // admin sees all org appointments (already filtered by orgCode)
       break
-
     case "super-admin":
-      // Super-admins can view everything across the company
-      delete query.orgCode // optional: super-admin may see all orgs
+      // full visibility across organizations
+      delete query.orgCode
       break
-
     default:
       return res.status(403).json({ message: "Unauthorized role" })
   }
 
-  // Optional filters
+  // 🔹 Optional filters
   if (status) query.status = status
-
   if (date) {
     const start = new Date(date)
     const end = new Date(date)
@@ -83,15 +75,31 @@ const getAppointments = asyncHandler(async (req, res) => {
     query.appointmentDate = { $gte: start, $lte: end }
   }
 
-  // Fetch with relational details
+  // 🔹 Pagination setup
+  const pageNum = Math.max(1, parseInt(page))
+  const limitNum = Math.min(100, parseInt(limit)) // cap limit for safety
+  const skip = (pageNum - 1) * limitNum
+
+  // 🔹 Count total for pagination
+  const total = await Appointment.countDocuments(query)
+
+  // 🔹 Fetch paginated data
   const appointments = await Appointment.find(query)
     .populate("patientId", "firstName lastName email phone")
     .populate("requesterProfessionalId", "firstName lastName specialization")
     .populate("createdBy", "username role branchCode")
     .sort({ appointmentDate: 1 })
+    .skip(skip)
+    .limit(limitNum)
+    .lean()
 
+  // ✅ Structured response
   res.status(200).json({
-    total: appointments.length,
+    total,
+    page: pageNum,
+    limit: limitNum,
+    totalPages: Math.ceil(total / limitNum),
+    count: appointments.length,
     appointments,
   })
 })
