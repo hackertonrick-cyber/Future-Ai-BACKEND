@@ -5,7 +5,7 @@ import { generateHTMLBody, generateTextBody } from "./notificationTemplates.js"
 import OrgUser from "../models/orgUserModel.js"
 
 const NOTIFICATION_RULES = {
-  access_request: { internal: true, email: true, socket: true },
+  access_request_org: { internal: true, email: true, socket: true },
   access_approved: { internal: true, email: true, socket: true },
   access_denied: { internal: true, email: true, socket: true },
   access_revoked: { internal: true, email: true, socket: true },
@@ -32,8 +32,7 @@ export const sendNotification = async ({
 }) => {
   try {
     const notify = overrideNotify || NOTIFICATION_RULES[type] || {}
-    if (!notify.internal && !notify.email && !notify.socket)
-      return { success: true, skipped: true }
+    if (!notify.internal && !notify.email && !notify.socket) return { success: true, skipped: true }
 
     // Normalize recipients array
     const targetIds = Array.isArray(recipients) ? recipients : [recipients]
@@ -102,10 +101,9 @@ export const sendNotification = async ({
 
       // ✅ Socket notification
       if (notify.socket) {
-        const channelPrefix =
-          model === "OrgUser" ? "org" : model === "Patient" ? "patient" : "system"
+        const channelPrefix = model === "OrgUser" ? "org" : model === "Patient" ? "patient" : "system"
         socketJobs.push(
-          privateNamespace.to(`${channelPrefix}:${targetId.toString()}`).emit("notification", {
+          privateNamespace.to(`${channelPrefix}:${targetId.toString()}`).emit("userNotification", {
             subject,
             message,
             type,
@@ -132,7 +130,7 @@ export const sendNotification = async ({
  */
 function typeToModel(type) {
   const map = {
-    access_request: "AccessRequest",
+    access_request_org: "AccessRequestOrg",
     access_approved: "AccessRequest",
     appointment: "Appointment",
     vital_update: "PatientVitals",
